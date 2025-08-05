@@ -40,3 +40,52 @@
     GIVEN the containers are running
     WHEN logs are collected from the Consul containers
     THEN log messages are available for health, cluster join/leave, and error events, and can be accessed via the centralized logging solution
+
+
+---------------------------------------------------------
+
+
+    Given the cluster has no existing Consul server instances,
+    when the deployment automation is executed,
+    then the first server is initialized as the bootstrap node and additional servers join automatically as peers.
+
+Service Registration
+
+    Given a Consul server cluster is running,
+    when a sample service is registered via the HTTP API from any node,
+    then the service appears in the Consul UI and can be discovered by other nodes.
+
+Consul UI Accessibility
+
+    Given the cluster is running,
+    when the Consul UI port (default 8500) is accessed from a browser on the admin network,
+    then the Consul web interface loads and shows cluster health and registered services.
+
+Failure Recovery
+
+    Given all Consul server containers are running,
+    when one container is forcefully stopped or removed,
+    then the remaining servers maintain quorum and cluster leadership is re-established automatically.
+
+Configuration Management
+
+    Given the deployment automation supports configuration templating,
+    when a configuration change (e.g., enable/disable specific Consul features) is applied and redeployed,
+    then the cluster applies the new settings with minimal downtime and configuration drift is avoided.
+
+Network Partition Handling
+
+    Given a network partition occurs that isolates one or more Consul nodes,
+    when connectivity is restored,
+    then all nodes rejoin the cluster automatically without manual intervention.
+
+Resource Limits and Health Checks
+
+    Given Consul containers have resource constraints (CPU, memory) and health checks configured,
+    when a resource limit is reached or a health check fails,
+    then alerts are generated and the unhealthy container is restarted according to policy.
+
+Rolling Upgrade
+
+    Given the cluster is running a previous Consul version,
+    when the deployment automation upgrades each node to a new version one at
