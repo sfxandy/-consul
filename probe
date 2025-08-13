@@ -1,0 +1,13 @@
+- name: Probe templating context
+  hosts: labs
+  gather_facts: false
+  tasks:
+    - name: Show values seen by the play (sanity)
+      ansible.builtin.debug:
+        msg: "host={{ inventory_hostname }} id={{ identifier | default('UNDEF') }} hv_id={{ hostvars[inventory_hostname].identifier | default('UNDEF') }}"
+
+    - name: Render probe file per host (NO delegation, NO run_once)
+      ansible.builtin.template:
+        src: probe.j2
+        dest: "/tmp/probe-{{ inventory_hostname }}.txt"
+        mode: "0644"
