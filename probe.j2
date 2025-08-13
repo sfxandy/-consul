@@ -1,0 +1,5 @@
+# probe
+host={{ inventory_hostname }}
+plain_id={{ identifier | default('UNDEF') }}
+hv_id={{ hostvars[inventory_hostname].identifier | default('UNDEF') }}
+now={{ '%Y-%m-%d %H:%M:%S' | strftime }}
