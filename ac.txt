@@ -1,91 +1,113 @@
-1. Basic Deployment
+Got it — here are the same tests rewritten as plain “Given / When / Then” acceptance criteria.
 
-    GIVEN a Podman environment with at least 3 hosts available
-    AND the latest Consul container image is accessible
-    WHEN the deployment automation (script, Ansible, etc.) is executed
-    THEN a 3-node Consul server cluster is started, with each node running as a Podman container on a separate host
+Sidecars register and are ready
 
-2. Cluster Health Verification
+Given a healthy Consul datacenter with Connect enabled, Service A and Service B registered with sidecars, and both services passing health
 
-    GIVEN the Consul containers are running
-    WHEN the consul members command is executed on any node
-    THEN all 3 nodes report as healthy, in the “server” role, and part of the same cluster
+When the Envoy sidecars for Service A and Service B start
 
-3. Data Persistence
+Then both proxies appear as sidecar-proxy instances in Consul, the Envoy readiness endpoints return 200, and both services remain passing
 
-    GIVEN Consul containers are configured with mapped volumes for data
-    WHEN a container is stopped and restarted
-    THEN its data and cluster state are preserved (no data loss, no rejoining as a new node)
+mTLS is enforced
 
-4. Port and Network Accessibility
+Given an allow intention from Service A → Service B
 
-    GIVEN the cluster is running
-    WHEN a request is sent to the Consul HTTP API (/v1/status/leader) from any host on the network
-    THEN the API responds with the current cluster leader’s address
+When Service A calls Service B through its local upstream
 
-5. Security (Optional/Advanced)
+Then the call succeeds (HTTP 200), the connection is TLS using a Consul-issued peer cert, and the cert identity matches Service B
 
-    GIVEN Consul is started with ACLs and TLS enabled
-    WHEN an unauthorized or non-TLS request is made to the API
-    THEN the request is rejected with an appropriate error
+Intention allows traffic
 
-6. Idempotent Re-deployment
+Given an allow intention from Service A → Service B
 
-    GIVEN the deployment automation is run a second time
-    WHEN no configuration has changed
-    THEN no new containers are created, existing ones are verified as healthy, and cluster state is maintained
+When Service A calls Service B
 
-7. Log and Monitoring Integration
+Then the response status is 200
 
-    GIVEN the containers are running
-    WHEN logs are collected from the Consul containers
-    THEN log messages are available for health, cluster join/leave, and error events, and can be accessed via the centralized logging solution
+Intention denies traffic
 
+Given a deny (or no) intention from Service A → Service B
 
----------------------------------------------------------
+When Service A calls Service B
 
+Then the call is blocked by the proxy (e.g., HTTP 403)
 
-    Given the cluster has no existing Consul server instances,
-    when the deployment automation is executed,
-    then the first server is initialized as the bootstrap node and additional servers join automatically as peers.
+Health checks gate routing
 
-Service Registration
+Given Service B has two instances where one is failing health and an allow intention exists
 
-    Given a Consul server cluster is running,
-    when a sample service is registered via the HTTP API from any node,
-    then the service appears in the Consul UI and can be discovered by other nodes.
+When Service A sends multiple requests to Service B
 
-Consul UI Accessibility
+Then no requests are sent to the failing instance and all responses come from healthy instance(s)
 
-    Given the cluster is running,
-    when the Consul UI port (default 8500) is accessed from a browser on the admin network,
-    then the Consul web interface loads and shows cluster health and registered services.
+Retry and timeout policy honored
 
-Failure Recovery
+Given a policy of 2 retries and 500 ms per-try timeout for A → B, and the first upstream attempt returns 503
 
-    Given all Consul server containers are running,
-    when one container is forcefully stopped or removed,
-    then the remaining servers maintain quorum and cluster leadership is re-established automatically.
+When Service A makes a request
 
-Configuration Management
+Then the proxy retries up to 2 times, succeeds if a subsequent attempt is 200, and total latency respects the overall timeout
 
-    Given the deployment automation supports configuration templating,
-    when a configuration change (e.g., enable/disable specific Consul features) is applied and redeployed,
-    then the cluster applies the new settings with minimal downtime and configuration drift is avoided.
+Path-based L7 routing
 
-Network Partition Handling
+Given a router that sends /v2/* to Service B v2 and other paths to Service B v1, with allow intentions in place
 
-    Given a network partition occurs that isolates one or more Consul nodes,
-    when connectivity is restored,
-    then all nodes rejoin the cluster automatically without manual intervention.
+When Service A requests /v2/status and /v1/status
 
-Resource Limits and Health Checks
+Then /v2/status is served by v2 and /v1/status by v1
 
-    Given Consul containers have resource constraints (CPU, memory) and health checks configured,
-    when a resource limit is reached or a health check fails,
-    then alerts are generated and the unhealthy container is restarted according to policy.
+Traffic splitting (progressive delivery)
 
-Rolling Upgrade
+Given a splitter on Service B sending 80% to v1 and 20% to v2 with allow intentions
 
-    Given the cluster is running a previous Consul version,
-    when the deployment automation upgrades each node to a new version one at
+When Service A sends 1000 requests to Service B
+
+Then ~80% of responses come from v1 and ~20% from v2 within tolerance
+
+Certificate rotation continuity
+
+Given active mTLS between Service A and Service B
+
+When Consul rotates leaf certificates
+
+Then in-flight connections remain stable and new connections succeed with the new certs
+
+Failure isolation when app down
+
+Given the Service B app process is stopped while its sidecar runs, and an allow intention exists
+
+When Service A calls Service B
+
+Then Envoy returns a fast upstream-unavailable error (e.g., 503), and after Service B recovers and health passes, subsequent calls return 200 without proxy restarts
+
+Mesh observability
+
+Given Envoy access logs and /stats are enabled and intentions allow traffic
+
+When Service A makes requests to Service B
+
+Then access logs record source service, upstream cluster, and response codes, and Envoy stats counters increase appropriately
+
+Consul DNS outside the mesh (optional)
+
+Given Consul DNS is available
+
+When resolving service-b.service.consul
+
+Then A/AAAA records are returned only for healthy instances
+
+Cross-namespace/partition access control (outline)
+
+Given Service A in namespace/partition X and Service B in namespace/partition Y with <allow|deny> intention
+
+When Service A calls Service B
+
+Then the request <succeeds|is denied> according to the intention
+
+Version-aware routing by header (outline)
+
+Given a router mapping header X-Api-Version: <ver> to backend service-b-<ver> and allow intentions
+
+When Service A calls Service B with header X-Api-Version: v1 or v2
+
+Then the response is served by service-b-v1 or service-b-v2 respectively
