@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: service-b
+  labels: { app: service-b }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: consul-agent
+      image: docker.io/hashicorp/consul:latest
+      command: ["/bin/sh","-lc"]
+      args:
+        - |
+          mkdir -p /consul/data /consul/config
+          cat > /consul/config/agent.hcl <<'EOF'
+          node_name    = "service-b-agent"
+          datacenter   = "dc1"
+          data_dir     = "/consul/data"
+          retry_join   = ["CONSUL_SERVER_1","CONSUL_SERVER_2"]  # <-- set yours
+          connect { enabled = true }
+          addresses { http = "127.0.0.1", grpc = "127.0.0.1" }
+          ports { http = 8500, grpc = 8502 }
+          EOF
+          exec consul agent -config-dir=/consul/config
+
+    - name: app
+      image: docker.io/library/alpine:3.20
+      command: ["/bin/sh","-lc"]
+      args:
+        - |
+          apk add --no-cache curl netcat-openbsd >/dev/null
+          cat > /tmp/service-b.json <<'EOF'
+          {
+            "service": {
+              "name": "service-b",
+              "port": 8080,
+              "check": { "http": "http://127.0.0.1:8080/health", "interval": "10s" },
+              "connect": { "sidecar_service": {} }
+            }
+          }
+          EOF
+          curl -sS -X PUT --data @/tmp/service-b.json \
+            http://127.0.0.1:8500/v1/agent/service/register
+
+          cat > /tmp/app.sh <<'EOF'
+          #!/bin/sh
+          health() { printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok\n"; }
+          resp()   { printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello from service-b\n"; }
+          while true; do
+            { IFS= read -r line; echo "$line" | grep -qi '^get /health' && health || resp; } | nc -l -p 8080 -q 1;
+          done
+          EOF
+          chmod +x /tmp/app.sh
+          exec /tmp/app.sh
+      env:
+        - name: CONSUL_HTTP_ADDR
+          value: "http://127.0.0.1:8500"
+      ports:
+        - containerPort: 8080
+
+    - name: envoy
+      image: docker.io/hashicorp/consul-connect-envoy:latest
+      command: ["/bin/sh","-lc"]
+      args:
+        - |
+          consul connect envoy -sidecar-for service-b \
+            -grpc-addr 127.0.0.1:8502 \
+            -admin-bind 0.0.0.0:19001
+      ports:
+        - containerPort: 20001
+        - containerPort: 19001
