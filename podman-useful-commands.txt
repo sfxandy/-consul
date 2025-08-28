@@ -1,0 +1,20 @@
+# list service and its sidecar on B's agent
+podman exec -it pod-service-b-consul-agent \
+  bash -lc 'curl -s localhost:8500/v1/agent/services | \
+    jq '\''to_entries[] | select(.value.Service=="service-b" or (.value.Service|test("service-b.*sidecar"))) | .value | {ID,Service,Port,Kind,Proxy}'\'''
+
+# show health checks for service-b
+podman exec -it pod-service-b-consul-agent \
+  bash -lc 'curl -s localhost:8500/v1/health/checks/service-b | \
+    jq '\''[.[] | {CheckID, Name, Status}]'\'''
+
+
+
+
+
+
+
+# from Envoy A sidecar (or via host if you mapped 19000)
+podman exec -it pod-service-a-envoy-sidecar \
+  curl -s http://127.0.0.1:19000/clusters?format=json | \
+  jq '.cluster_statuses[] | select(.name|test("service-b")) | {name, hosts: (.host_statuses|length), healthy: ([.host_statuses[] | select(.health_status.eds_health_status=="HEALTHY")]|length)}'
