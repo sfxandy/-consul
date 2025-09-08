@@ -1,0 +1,95 @@
+Service registration & health
+
+Scenario: Legacy Quartz service registered with passing health
+
+GIVEN a Consul datacenter <CONSUL_DC> and a Quartz service <QUARTZ_SERVICE> at <QUARTZ_HOST>:<QUARTZ_PORT>
+WHEN the service is registered with a <CHECK_TYPE> health check on <HEALTH_ENDPOINT> at interval <CHECK_INTERVAL>
+THEN the service appears in the catalog with ID <QUARTZ_SERVICE_ID> and the health check is passing
+
+Scenario: Health check surfaces failures
+
+GIVEN the same registration
+WHEN <HEALTH_ENDPOINT> returns non-success or times out for <N> consecutive intervals
+THEN the Consul health status becomes critical and the instance is excluded when querying with passingOnly=true
+
+
+
+
+
+
+Service discovery reports correct URL(s)
+
+Scenario: HTTP API lists correct address/port and URL metadata
+
+GIVEN <QUARTZ_SERVICE> health is passing
+WHEN querying /v1/health/service/<QUARTZ_SERVICE>?passingOnly=true
+THEN the response includes entries with Service.Address = <QUARTZ_HOST> and Service.Port = <QUARTZ_PORT> and URL metadata/tags yielding <EXPECTED_URLS>
+
+
+Scenario: DNS returns correct SRV/A records
+
+GIVEN <QUARTZ_SERVICE> health is passing
+WHEN resolving _<PROTO>._tcp.<QUARTZ_SERVICE>.service.consul
+THEN SRV targets map to <QUARTZ_HOST> with port <QUARTZ_PORT> and A/AAAA records resolve to expected IPs
+
+
+
+
+
+Envoy sidecar creation
+
+Scenario: Envoy sidecar for client service is created and healthy
+
+GIVEN a meshed client service <CLIENT_SERVICE> with Connect enabled
+WHEN the service starts
+THEN a sidecar <CLIENT_SERVICE>-sidecar-proxy is registered, its connect-envoy health is passing, and Envoy admin /clusters shows an upstream for <QUARTZ_SERVICE>
+
+
+
+
+Scenario: Upstream listener available
+
+GIVEN <CLIENT_SERVICE> declares an upstream to <QUARTZ_SERVICE> on <UPSTREAM_LOCAL_PORT>
+WHEN the sidecar is running
+THEN <UPSTREAM_LOCAL_PORT> is listening locally and routes traffic to <QUARTZ_SERVICE>
+
+
+
+
+
+Reachability within the mesh
+
+Scenario: Quartz reachable from inside the mesh
+
+GIVEN <CLIENT_SERVICE> has an ALLOW intention to <QUARTZ_SERVICE> and <QUARTZ_SERVICE> health is passing
+WHEN making a request from within the <CLIENT_SERVICE> container to http://localhost:<UPSTREAM_LOCAL_PORT><TEST_PATH>
+THEN the call succeeds with status <EXPECTED_STATUS_CODE> within <SLA_MS> ms and Envoy access logs show a successful mTLS upstream to <QUARTZ_SERVICE>
+
+
+
+
+Scenario: Client-facing HTTP service can call Quartz with ALLOW
+
+GIVEN a client-facing service <EDGE_HTTP_SERVICE> and an ALLOW intention from <EDGE_HTTP_SERVICE> to <QUARTZ_SERVICE>
+WHEN calling <EDGE_HTTP_SERVICE> at <EDGE_PATH> that triggers a mesh call to <QUARTZ_SERVICE>
+THEN <EDGE_HTTP_SERVICE> returns a success response reflecting a successful upstream call
+
+
+
+Intentions enforce access
+
+Scenario: DENY intention blocks service-to-service call
+
+GIVEN a DENY intention from <CLIENT_SERVICE> to <QUARTZ_SERVICE>
+WHEN issuing a request from <CLIENT_SERVICE> to http://localhost:<UPSTREAM_LOCAL_PORT><TEST_PATH>
+THEN the request is blocked (e.g., 403 or connection denied) and Envoy logs indicate RBAC denial
+
+
+
+
+
+Scenario: DENY vs ALLOW toggling changes behavior without restart
+
+GIVEN an existing ALLOW intention between <CLIENT_SERVICE> and <QUARTZ_SERVICE>
+WHEN changing the intention to DENY
+THEN subsequent requests fail as above; when reverted to ALLOW, subsequent requests succeed without restarting either service
