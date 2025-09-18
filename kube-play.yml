@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: consul-terminating-gateway-pod
+  labels:
+    app: consul-terminating-gateway
+spec:
+  restartPolicy: Always
+
+  # Attach to same network your other pods use (if applicable)
+  # networks:
+  #   - name: consul-net
+
+  volumes:
+    - name: bootstrap-vol
+      emptyDir: {}
+    - name: consul-vol
+      emptyDir: {}
+
+  # --- 0) Init: write Envoy bootstrap JSON into /bootstrap ---
+  initContainers:
+    - name: write-bootstrap
+      image: registry.example.com/org/rhel9-base:latest     # RHEL9 base (UID 1001 ok)
+      command: ["/bin/sh","-lc"]
+      volumeMounts:
+        - name: bootstrap-vol
+          mountPath: /bootstrap
+      args:
+        - |
+          set -e
+          cat > /bootstrap/egress-tgw-bootstrap.json <<'EOF'
+          {
+            "static_resources": {
+              "listeners": [],
+              "clusters": [
+                {
+                  "name": "dev-credit-foo-bar",
+                  "type": "STRICT_DNS",
+                  "connect_timeout": "2s",
+                  "load_assignment": {
+                    "cluster_name": "dev-credit-foo-bar",
+                    "endpoints": [
+                      {
+                        "lb_endpoints": [
+                          {
+                            "endpoint": {
+                              "address": {
+                                "socket_address": {
+                                  "address": "ggdgsswpo350.foodc.emea.bank.com",
+                                  "port_value": 49519
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "admin": {
+              "access_log_path": "/dev/null",
+              "address": { "socket_address": { "address": "0.0.0.0", "port_value": 19011 } }
+            }
+          }
+          EOF
+
+  containers:
+    # --- 1) Local Consul Agent (localhost only, non-root paths) ---
+    - name: consul-agent
+      image: registry.example.com/org/consul-rhel9:latest   # your org-approved Consul on RHEL9 image
+      command: ["/bin/sh","-lc"]
+      volumeMounts:
+        - name: consul-vol
+          mountPath: /tmp/consul
+      args:
+        - |
+          set -e
+          AGENT_DIR="/tmp/consul"
+          mkdir -p "$AGENT_DIR/data" "$AGENT_DIR/config"
+
+          # Agent config
+          cat > "$AGENT_DIR/config/agent.hcl" <<'EOF'
+          node_name  = "egress-tgw-agent"
+          datacenter = "dc1"
+          data_dir   = "/tmp/consul/data"
+          retry_join = ["CONSUL_SERVER_1","CONSUL_SERVER_2"]   # <-- set your servers
+          connect { enabled = true }
+          addresses { http = "127.0.0.1", grpc = "127.0.0.1" }
+          ports     { http = 8500, grpc = 8502 }
+          EOF
+
+          exec consul agent -config-dir="$AGENT_DIR/config"
+      env:
+        - name: CONSUL_HTTP_ADDR
+          value: "http://127.0.0.1:8500"
+      # no containerPort needed; agent is localhost-only
+
+    # --- 2) Envoy Terminating Gateway ---
+    - name: envoy-terminating-gateway
+      image: docker.io/hashicorp/consul-connect-envoy:latest  # or your org-pinned Envoy+Consul image
+      command: ["/bin/sh","-lc"]
+      volumeMounts:
+        - name: bootstrap-vol
+          mountPath: /bootstrap
+      ports:
+        - containerPort: 19011   # Envoy admin (optional to expose)
+      env:
+        - name: CONSUL_HTTP_ADDR
+          value: "http://127.0.0.1:8500"
+      args:
+        - |
+          set -e
+          # Wait for local agent to be ready
+          until consul info >/dev/null 2>&1; do
+            echo "waiting for local consul agent..." ; sleep 0.5
+          done
+
+          # Register & run as a Terminating Gateway named 'egress-tgw'
+          exec consul connect envoy \
+            -gateway=terminating \
+            -register \
+            -service egress-tgw \
+            -admin-bind 0.0.0.0:19011 \
+            -- -c /bootstrap/egress-tgw-bootstrap.json -l info
