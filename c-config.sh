@@ -1,42 +1,91 @@
-CONSUL=http://<one-of-your-servers>:8500
+# QZSD Migration Discussion
 
-# 1) Virtual mesh service (the “name” Service-A will call)
-curl -sS -X PUT "$CONSUL/v1/config/service-defaults/dev-credit-foo-bar" \
-  -H 'Content-Type: application/json' \
-  -d '{"Kind":"service-defaults","Name":"dev-credit-foo-bar","Protocol":"http"}'
+There is a legacy service discovery system, internal to the org, called QZSD. 
+It's slow, painful, and tightly coupled with the application framework. 
+The plan is to migrate to Consul-Envoy using Consul Connect.
 
-# 2) Authorize this TGW to serve that service
-curl -sS -X PUT "$CONSUL/v1/config/terminating-gateway/egress-tgw" \
-  -H 'Content-Type: application/json' \
-  -d '{"Kind":"terminating-gateway","Name":"egress-tgw","Services":[{"Name":"dev-credit-foo-bar"}]}'
+---
 
-# 3) Tell Consul where that virtual service actually goes (external host:port)
-# Simple, direct mapping using a resolver override in 1.21.x
-curl -sS -X PUT "$CONSUL/v1/config/service-resolver/dev-credit-foo-bar" \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "Kind":"service-resolver",
-        "Name":"dev-credit-foo-bar",
-        "Redirect": { "Service": "dev-credit-foo-bar-external" }
-      }'
+## Option A — Control plane in QZSD writing directly to Consul
 
-curl -sS -X PUT "$CONSUL/v1/config/service-defaults/dev-credit-foo-bar-external" \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "Kind":"service-defaults",
-        "Name":"dev-credit-foo-bar-external",
-        "Protocol":"http"
-      }'
+QZSD makes API calls to Consul to register services, configure service-resolvers, routers, terminating gateways, etc.
 
-curl -sS -X PUT "$CONSUL/v1/config/service-resolver/dev-credit-foo-bar-external" \
-  -H 'Content-Type: application/json' \
-  -d "{
-        \"Kind\":\"service-resolver\",
-        \"Name\":\"dev-credit-foo-bar-external\",
-        \"Subsets\": {
-          \"default\": {
-            \"Service\":\"dev-credit-foo-bar-external\",
-            \"Override\": { \"Address\":\"ggdgsswpo350.foodc.emea.bank.com\", \"Port\":49519 }
-          }
-        }
-      }"
+**Pros:**
+- Fewer moving parts
+- Lower latency (changes visible immediately)
+- Simpler debugging path
+- Allows orchestration of multi-step changes
+
+**Cons:**
+- Tight coupling to Consul APIs and semantics
+- Propagation of failures from Consul back into QZSD
+- QZSD must hold powerful ACL tokens (large security blast radius)
+- Harder to audit/rollback
+- Difficult for blue/green or multi-control-plane evolution
+
+---
+
+## Option B — Intermediate store + reconciler
+
+QZSD writes service data to an intermediate store (Git, DB, or event stream). 
+A reconciler process reads the store and applies changes to Consul.
+
+**Pros:**
+- Decouples QZSD from Consul specifics
+- Clear audit trail and rollback
+- Enables dry-run, policy checks, and safer rollouts
+- Resilient to Consul hiccups (store absorbs backpressure)
+- Easy disaster recovery (replay from store)
+- Smaller security blast radius (only reconciler holds Consul tokens)
+- Enables blue/green control planes easily
+
+**Cons:**
+- Eventual consistency instead of immediate
+- More moving parts to manage
+- Need to maintain mapping schema (desired state → Consul resources)
+- Must handle dependency ordering in the reconciler
+
+---
+
+## Scale Considerations
+
+With ~10,000 services, scale favors Option B. Unknown change rate implies bursts, so buffering, batching, and idempotency are essential.
+
+**Recommended approach:**
+- Put static config (resolvers, routers, intentions, gateways) in versioned store
+- Put dynamic endpoints on event stream, or rely on agents/sidecars to self-register
+
+---
+
+## Migration Path
+
+1. Shadow mode: QZSD writes to store; reconciler runs in dry-run against Consul  
+2. Parallel Consul deployment: reconciler applies config for validation  
+3. Incremental cutover via gateways and selected services  
+4. Sidecars handle modern services, reconciler handles legacy endpoints  
+5. Gradual traffic cutover with resolvers/routers/splitters  
+6. Retire QZSD after services migrate  
+
+---
+
+## Blue/Green Control Planes
+
+- Reconciler applies desired state to both clusters (A=green, B=blue).  
+- Continuous drift detection ensures configs are identical before switching.  
+- Agents switch between clusters by re-pointing to new servers/DNS.  
+- Rollback is simple: switch agents back.  
+
+---
+
+## Continuous Drift Detection
+
+Drift detection highlights mismatches between desired and actual state, such as:
+- Missing or extra config objects
+- Field-level mismatches (timeouts, retries, subset filters)
+- Stale service registrations or endpoints
+- Partial apply failures
+- Namespace/partition mismatches
+- Gateway exposure differences
+- Intention/security drift (e.g., unexpected allows)
+
+This ensures correctness, auditability, and safe operation at scale.
