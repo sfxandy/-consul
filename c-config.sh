@@ -1,91 +1,37 @@
-# QZSD Migration Discussion
+What it looks like
 
-There is a legacy service discovery system, internal to the org, called QZSD. 
-It's slow, painful, and tightly coupled with the application framework. 
-The plan is to migrate to Consul-Envoy using Consul Connect.
+QZSD emits desired state (services, tags, health, routers/resolvers, gateway intents) into a store (Git repo, DB, object store, or an event stream).
 
----
+A stateless “reconciler” (operator) watches that store and converges Consul to match it (idempotently).
 
-## Option A — Control plane in QZSD writing directly to Consul
+Pros
 
-QZSD makes API calls to Consul to register services, configure service-resolvers, routers, terminating gateways, etc.
+Decoupling & safety: Consul-specific logic, tokens, and version quirks live in the reconciler—not inside QZSD.
 
-**Pros:**
-- Fewer moving parts
-- Lower latency (changes visible immediately)
-- Simpler debugging path
-- Allows orchestration of multi-step changes
+Auditability & rollback: the store is your source of truth. It’s easy to diff, review, roll back, and replay. Great for compliance.
 
-**Cons:**
-- Tight coupling to Consul APIs and semantics
-- Propagation of failures from Consul back into QZSD
-- QZSD must hold powerful ACL tokens (large security blast radius)
-- Harder to audit/rollback
-- Difficult for blue/green or multi-control-plane evolution
+Dry-run & policy gates: you can validate schemas, run linters, and enforce policy (e.g., intentions must exist before routers) before touching Consul.
 
----
+Resilience to Consul hiccups: the reconciler can absorb backpressure, batch, rate-limit, and retry without stalling QZSD.
 
-## Option B — Intermediate store + reconciler
+Disaster recovery: rebuilding a Consul cluster is as simple as replaying the store.
 
-QZSD writes service data to an intermediate store (Git, DB, or event stream). 
-A reconciler process reads the store and applies changes to Consul.
+Blue/green planes: one desired-state feed can drive two Consul environments (A/B) for cutovers.
 
-**Pros:**
-- Decouples QZSD from Consul specifics
-- Clear audit trail and rollback
-- Enables dry-run, policy checks, and safer rollouts
-- Resilient to Consul hiccups (store absorbs backpressure)
-- Easy disaster recovery (replay from store)
-- Smaller security blast radius (only reconciler holds Consul tokens)
-- Enables blue/green control planes easily
+Principle of least privilege: only the reconciler holds Consul ACLs; QZSD never touches Consul.
 
-**Cons:**
-- Eventual consistency instead of immediate
-- More moving parts to manage
-- Need to maintain mapping schema (desired state → Consul resources)
-- Must handle dependency ordering in the reconciler
+Cons
 
----
+Eventual consistency: there’s a lag between QZSD emitting and Consul reflecting the change (tunable but real).
 
-## Scale Considerations
+More moving parts: you must operate the store and the reconciler, plus their observability/alerts.
 
-With ~10,000 services, scale favors Option B. Unknown change rate implies bursts, so buffering, batching, and idempotency are essential.
+Dual schema/version drift: you now own a stable “platform schema” in the store and the mapping to Consul resources—keep those in lockstep.
 
-**Recommended approach:**
-- Put static config (resolvers, routers, intentions, gateways) in versioned store
-- Put dynamic endpoints on event stream, or rely on agents/sidecars to self-register
+Complex sequencing: the reconciler must handle dependency graphs (e.g., create resolver before router; ensure intentions exist before exposing via terminating gateway).
 
----
+Where it shines
 
-## Migration Path
+Medium/large estates; regulated environments; teams that value GitOps-style workflows, audits, and safe rollouts.
 
-1. Shadow mode: QZSD writes to store; reconciler runs in dry-run against Consul  
-2. Parallel Consul deployment: reconciler applies config for validation  
-3. Incremental cutover via gateways and selected services  
-4. Sidecars handle modern services, reconciler handles legacy endpoints  
-5. Gradual traffic cutover with resolvers/routers/splitters  
-6. Retire QZSD after services migrate  
-
----
-
-## Blue/Green Control Planes
-
-- Reconciler applies desired state to both clusters (A=green, B=blue).  
-- Continuous drift detection ensures configs are identical before switching.  
-- Agents switch between clusters by re-pointing to new servers/DNS.  
-- Rollback is simple: switch agents back.  
-
----
-
-## Continuous Drift Detection
-
-Drift detection highlights mismatches between desired and actual state, such as:
-- Missing or extra config objects
-- Field-level mismatches (timeouts, retries, subset filters)
-- Stale service registrations or endpoints
-- Partial apply failures
-- Namespace/partition mismatches
-- Gateway exposure differences
-- Intention/security drift (e.g., unexpected allows)
-
-This ensures correctness, auditability, and safe operation at scale.
+Multi–data center / WAN federation, where you need replayability and staged delivery.
