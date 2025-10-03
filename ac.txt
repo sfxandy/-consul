@@ -1,95 +1,131 @@
-Service registration & health
+Safe Restart & Maintenance Process for Consul Servers
+Pre-checks
 
-Scenario: Legacy Quartz service registered with passing health
+Confirm quorum size
 
-GIVEN a Consul datacenter <CONSUL_DC> and a Quartz service <QUARTZ_SERVICE> at <QUARTZ_HOST>:<QUARTZ_PORT>
-WHEN the service is registered with a <CHECK_TYPE> health check on <HEALTH_ENDPOINT> at interval <CHECK_INTERVAL>
-THEN the service appears in the catalog with ID <QUARTZ_SERVICE_ID> and the health check is passing
+Consul needs a majority of servers to be available to maintain Raft quorum.
 
-Scenario: Health check surfaces failures
+Example:
 
-GIVEN the same registration
-WHEN <HEALTH_ENDPOINT> returns non-success or times out for <N> consecutive intervals
-THEN the Consul health status becomes critical and the instance is excluded when querying with passingOnly=true
+3 servers → quorum = 2
 
+5 servers → quorum = 3
 
+Never take down ≥ (N − quorum + 1) servers at the same time.
 
+Check cluster health
 
-
-
-Service discovery reports correct URL(s)
-
-Scenario: HTTP API lists correct address/port and URL metadata
-
-GIVEN <QUARTZ_SERVICE> health is passing
-WHEN querying /v1/health/service/<QUARTZ_SERVICE>?passingOnly=true
-THEN the response includes entries with Service.Address = <QUARTZ_HOST> and Service.Port = <QUARTZ_PORT> and URL metadata/tags yielding <EXPECTED_URLS>
+consul operator raft list-peers
 
 
-Scenario: DNS returns correct SRV/A records
+All expected peers should show up.
 
-GIVEN <QUARTZ_SERVICE> health is passing
-WHEN resolving _<PROTO>._tcp.<QUARTZ_SERVICE>.service.consul
-THEN SRV targets map to <QUARTZ_HOST> with port <QUARTZ_PORT> and A/AAAA records resolve to expected IPs
+One peer is marked leader.
 
+No peers should be stale.
 
-
-
-
-Envoy sidecar creation
-
-Scenario: Envoy sidecar for client service is created and healthy
-
-GIVEN a meshed client service <CLIENT_SERVICE> with Connect enabled
-WHEN the service starts
-THEN a sidecar <CLIENT_SERVICE>-sidecar-proxy is registered, its connect-envoy health is passing, and Envoy admin /clusters shows an upstream for <QUARTZ_SERVICE>
+consul members
 
 
+All servers should be alive.
+
+Confirm datacenter is consistent.
+
+Rolling maintenance steps (per server)
+
+Do this one server at a time to preserve quorum.
+
+Pick a follower (not the leader)
+
+Prefer restarting a follower first.
+
+Find the leader with:
+
+consul operator raft list-peers
 
 
-Scenario: Upstream listener available
+Skip the leader until the end.
 
-GIVEN <CLIENT_SERVICE> declares an upstream to <QUARTZ_SERVICE> on <UPSTREAM_LOCAL_PORT>
-WHEN the sidecar is running
-THEN <UPSTREAM_LOCAL_PORT> is listening locally and routes traffic to <QUARTZ_SERVICE>
+Drain traffic from the server (optional but safer)
 
+Mark it ineligible for leader election:
 
-
-
-
-Reachability within the mesh
-
-Scenario: Quartz reachable from inside the mesh
-
-GIVEN <CLIENT_SERVICE> has an ALLOW intention to <QUARTZ_SERVICE> and <QUARTZ_SERVICE> health is passing
-WHEN making a request from within the <CLIENT_SERVICE> container to http://localhost:<UPSTREAM_LOCAL_PORT><TEST_PATH>
-THEN the call succeeds with status <EXPECTED_STATUS_CODE> within <SLA_MS> ms and Envoy access logs show a successful mTLS upstream to <QUARTZ_SERVICE>
+consul operator raft remove-peer <node_id>
 
 
+or set:
+
+consul operator autopilot promote
 
 
-Scenario: Client-facing HTTP service can call Quartz with ALLOW
+Alternatively, use maintenance mode:
 
-GIVEN a client-facing service <EDGE_HTTP_SERVICE> and an ALLOW intention from <EDGE_HTTP_SERVICE> to <QUARTZ_SERVICE>
-WHEN calling <EDGE_HTTP_SERVICE> at <EDGE_PATH> that triggers a mesh call to <QUARTZ_SERVICE>
-THEN <EDGE_HTTP_SERVICE> returns a success response reflecting a successful upstream call
+consul maint -enable -reason="Server maintenance"
 
 
+Stop Consul agent cleanly
 
-Intentions enforce access
+e.g. systemctl stop consul
 
-Scenario: DENY intention blocks service-to-service call
+Ensure it exits without corruption.
 
-GIVEN a DENY intention from <CLIENT_SERVICE> to <QUARTZ_SERVICE>
-WHEN issuing a request from <CLIENT_SERVICE> to http://localhost:<UPSTREAM_LOCAL_PORT><TEST_PATH>
-THEN the request is blocked (e.g., 403 or connection denied) and Envoy logs indicate RBAC denial
+Perform your work
+
+OS patching, Consul upgrade, config changes, etc.
+
+Restart Consul agent
+
+e.g. systemctl start consul
+
+Watch logs (journalctl -u consul -f).
+
+Verify it rejoins cluster
+
+consul operator raft list-peers
+consul members
 
 
+The restarted server should show as a voter again.
+
+Leader should remain unchanged (unless you’re intentionally rotating).
+
+Repeat for other followers
+
+Special case: Restarting the leader
+
+Do this last.
+
+When you stop the leader, the cluster should hold a new election.
+
+Watch logs or run:
+
+consul operator raft list-peers
 
 
+to confirm a new leader was chosen.
 
-Scenario: DENY vs ALLOW toggling changes behavior without restart
+Restart the old leader, verify it rejoins as a follower, then it may later be re-elected.
 
-GIVEN an existing ALLOW intention between <CLIENT_SERVICE> and <QUARTZ_SERVICE>
-WHEN changing the intention to DENY
-THEN subsequent requests fail as above; when reverted to ALLOW, subsequent requests succeed without restarting either service
+Post-maintenance validation
+
+Ensure Autopilot is healthy:
+
+consul operator autopilot state
+
+
+All servers stable, no unhealthy peers.
+
+Check Raft index progression:
+
+consul info | grep raft
+
+
+commit_index should be moving forward.
+
+Re-enable maintenance if you disabled it.
+
+✅ TL;DR Process
+
+Check quorum → Restart one follower → Verify → Repeat → Restart leader last → Verify cluster healthy.
+
+⚡ Question for you: do you want me to also include a step-by-step upgrade process (i.e. when changing Consul version across the cluster), or just keep this as a restart/maintenance runbook?
