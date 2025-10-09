@@ -1,0 +1,35 @@
+ADDR=http://127.0.0.1:8500
+MGMT=<your-management-token>
+ACLs enabled + policies (newer field names)
+
+bash
+Copy code
+curl -s -H "X-Consul-Token: $MGMT" $ADDR/v1/agent/self \
+| jq '{ACLsEnabled:.DebugConfig.ACLsEnabled,
+       DefaultPolicy:(.DebugConfig.ACLResolverSettings.DefaultPolicy // "unknown"),
+       DownPolicy:(.DebugConfig.ACLResolverSettings.DownPolicy // "unknown")}'
+403 vs 200 smoke test
+
+bash
+Copy code
+curl -s -o /dev/null -w "Anon HTTP %{http_code}\n" $ADDR/v1/catalog/services
+curl -s -H "X-Consul-Token: $MGMT" -o /dev/null -w "Auth HTTP %{http_code}\n" $ADDR/v1/catalog/services
+Agent token present on this node
+
+bash
+Copy code
+curl -s -H "X-Consul-Token: $MGMT" $ADDR/v1/agent/self \
+| jq '{Node:.Config.NodeName,
+       AgentTokenSet: ( .DebugConfig.ACLTokens.agent? // "" | tostring | length ) > 0}'
+Leader + “yep this is Consul” headers
+
+bash
+Copy code
+curl -s -H "X-Consul-Token: $MGMT" -D- -o /dev/null $ADDR/v1/status/leader \
+| grep -E 'X-Consul-(Index|Knownleader|Lastcontact)'
+Tiny helper if you like:
+
+bash
+Copy code
+consul_curl() { curl -sS -H "X-Consul-Token: $CONSUL_HTTP_TOKEN" "$@"; }
+# Then: consul_curl $ADDR/v1/catalog/services
