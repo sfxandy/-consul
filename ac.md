@@ -1,83 +1,228 @@
 ```
-Feature: Run Nomad as a non-root user via user-level systemd
+Feature: Schedule workloads on a specific host with Nomad
+  Nomad should start and stop a binary and a Podman pod on a designated node.
 
   Background:
-    Given a Linux host with systemd installed
-    And a non-root OS user "nomadusr" with a home directory "/home/nomadusr"
-    And loginctl lingering is allowed for "nomadusr"
-    And the following directories exist and are owned by "nomadusr":
-      | path                              |
-      | /home/nomadusr/.config/nomad.d    |
-      | /home/nomadusr/.local/var/nomad   |
-      | /home/nomadusr/.local/bin         |
+    GIVEN a Nomad cluster with at least one client node registered as "workhorse-01"
+    AND the client node "workhorse-01" has node meta "target=true" and "hostname=workhorse-01"
+    AND the Nomad ACL token with job submit privileges is available
+    AND the "exec" and "podman" task drivers are enabled on "workhorse-01"
+    AND Podman is installed and runnable by the Nomad client user on "workhorse-01"
+    AND network ports required by the workloads are free on "workhorse-01"
 
-  Scenario: Nomad binary is present and executable for the user
-    Given the Nomad version ">=1.7.0"
-    When I check "/home/nomadusr/.local/bin/nomad"
-    Then the file exists
-    And it is executable by "nomadusr"
-    And running "nomad version" as "nomadusr" returns the expected version
+  # ---------------------- Binary via exec/raw_exec ----------------------
 
-  Scenario: User-level systemd unit is installed
-    Given the file "/home/nomadusr/.config/systemd/user/nomad.service"
-    Then it defines "ExecStart=%h/.local/bin/nomad agent -config %h/.config/nomad.d"
-    And it defines "Restart=on-failure"
-    And it sets "Environment=NOMAD_DATA_DIR=%h/.local/var/nomad"
+  Scenario: Start a binary on the specific host
+    GIVEN a Nomad job file "binary.nomad.hcl" with a task "hello-bin" using the "exec" driver
+    AND the task command is "/home/nomadusr/bin/hello" with args "--port" "8081"
+    AND the group has a constraint "node.meta.target == true"
+    AND the group has a constraint "attr.unique.hostname == workhorse-01"
+    WHEN I run "nomad job run binary.nomad.hcl"
+    THEN the job "binary" should be in status "running" within 30 seconds
+    AND the latest allocation should be placed on node "workhorse-01"
+    AND a process named "hello" should be running on "workhorse-01"
+    AND "curl http://127.0.0.1:8081/health" on "workhorse-01" should return HTTP 200
 
-  Scenario: Lingering enabled so the user service survives logout and reboot
-    Given I run "loginctl show-user nomadusr"
-    Then "Linger=yes" is present
+  Scenario: Stop the binary cleanly
+    GIVEN the job "binary" is running on "workhorse-01"
+    WHEN I run "nomad job stop binary"
+    THEN the job "binary" should be in status "dead" within 30 seconds
+    AND there should be no running process named "hello" on "workhorse-01"
+    AND the last allocation status should be "complete" with exit code 0
 
-  Scenario: Service is enabled and started for the user
-    When I run "systemctl --user enable --now nomad.service" as "nomadusr"
-    Then "systemctl --user is-active nomad.service" is "active"
-    And "systemctl --user is-enabled nomad.service" is "enabled"
+  Scenario: Restart the binary and remain pinned to the host
+    GIVEN the job "binary" is stopped
+    WHEN I run "nomad job run binary.nomad.hcl"
+    THEN the job "binary" should be in status "running"
+    AND the allocation should be on node "workhorse-01" (not any other node)
 
-  Scenario: Service starts automatically after host reboot
-    Given the host is rebooted
-    When I check "systemctl --user is-active nomad.service" as "nomadusr"
-    Then it is "active"
+  Scenario: Binary restarts on task failure
+    GIVEN the job "binary" has a restart stanza "attempts = 3, mode = delay, interval = 30s"
+    AND the process "hello" exits with a non-zero code
+    WHEN Nomad detects the failed allocation
+    THEN Nomad should restart the task within the configured interval
+    AND the allocation status should become "running" again on "workhorse-01"
 
-  Scenario: Nomad listens on non-privileged ports
-    When the service is running
-    Then a process owned by "nomadusr" listens on TCP ports 4646, 4647, and 4648
-    And no privileged (<1024) ports are bound
+  Scenario: Constraint prevents scheduling on a non-target host
+    GIVEN another client node "workhorse-02" is registered without node meta "target=true"
+    WHEN I drain "workhorse-01"
+    THEN the job "binary" should not start on "workhorse-02"
+    AND the job should remain "pending" with a constraint evaluation message referencing "node.meta.target"
 
-  Scenario: Config directory and data dir are writable by the user only
-    Then "/home/nomadusr/.config/nomad.d" is 0700 and owned by "nomadusr"
-    And "/home/nomadusr/.local/var/nomad" is 0700 and owned by "nomadusr"
+  # ---------------------- Podman pod ----------------------
 
-  Scenario: Minimal valid Nomad configuration is in place
-    Given a file "/home/nomadusr/.config/nomad.d/00-base.hcl"
-    Then the file contains a valid HCL config with:
-      | key                  | value                                 |
-      | data_dir             | "/home/nomadusr/.local/var/nomad"     |
-      | bind_addr            | "0.0.0.0"                             |
-      | server.enabled       | true or false (per role variable)     |
-      | client.enabled       | true or false (per role variable)     |
-    And "nomad agent -config ..." validates without error
+  Scenario: Start a Podman pod on the specific host
+    GIVEN a Nomad job file "pod.nomad.hcl" with a group "api" using the "podman" driver
+    AND the task "api-pod" image is "docker.io/library/nginx:stable"
+    AND the task maps port "http" to host port 8082
+    AND the group has a constraint "attr.unique.hostname == workhorse-01"
+    WHEN I run "nomad job run pod.nomad.hcl"
+    THEN the job "pod" should be in status "running" within 60 seconds
+    AND the allocation should be on node "workhorse-01"
+    AND "curl http://127.0.0.1:8082" on "workhorse-01" should return HTTP 200
 
-  Scenario: Logs are handled by journald under the user
-    When I run "journalctl --user -u nomad -n 1" as "nomadusr"
-    Then I see a recent log line from Nomad
-    And no log files are written outside the user’s home
+  Scenario: Stop the Podman pod cleanly
+    GIVEN the job "pod" is running on "workhorse-01"
+    WHEN I run "nomad job stop pod"
+    THEN the job "pod" should be in status "dead" within 60 seconds
+    AND no Podman container from the job "pod" should be running on "workhorse-01"
+    AND the last allocation status should be "complete" with exit code 0
 
-  Scenario: Health endpoint is reachable
-    When I GET "http://127.0.0.1:4646/v1/status/leader"
-    Then I receive 200 OK within 5 seconds
+  Scenario: Podman pod restarts on container crash
+    GIVEN the job "pod" has a restart stanza "attempts = 5, delay = 10s, mode = delay"
+    AND the container process exits non-zero
+    WHEN Nomad detects the failed allocation
+    THEN Nomad should restart the container within the configured delay
+    AND the allocation should return to "running" on "workhorse-01"
 
-  Scenario: Restart on config changes
-    Given I change a file in "/home/nomadusr/.config/nomad.d"
-    When the user-level systemd path unit or role handler triggers
-    Then "nomad.service" restarts
-    And "systemctl --user show -p NRestarts nomad" increments by at least 1
+  Scenario: Podman image pulled only when absent
+    GIVEN the job "pod" sets "force_pull = false" in the podman config
+    AND the image "docker.io/library/nginx:stable" is already present on "workhorse-01"
+    WHEN I run "nomad job run pod.nomad.hcl"
+    THEN the allocation should start without pulling the image
+    AND the task event stream should not contain a "pulled image" event
 
-  Scenario: No root privileges required at runtime
-    When the service is running
-    Then the Nomad PID has no effective root privileges
-    And capabilities such as CAP_NET_BIND_SERVICE are not present
+  Scenario: Rolling update of the Podman pod (count = 1)
+    GIVEN the job "pod" has update stanza "max_parallel = 1, health_check = 'checks', min_healthy_time = '10s'"
+    AND the group count is 1
+    WHEN I change the image tag to "nginx:stable-perl" and run "nomad job run -check-index pod.nomad.hcl"
+    THEN the old allocation should stop only after the new allocation is healthy on "workhorse-01"
+    AND there should never be more than 1 running allocation during the update
 
-  Scenario: Firewall allows Nomad ports when enabled
-    Given a host firewall is enabled
-    Then inbound TCP 4646/4647/4648 are allowed as per role variables
+  # ---------------------- Common assertions ----------------------
+
+  Scenario: Health checks report passing for both jobs
+    GIVEN the jobs "binary" and "pod" are running
+    WHEN I query "http://127.0.0.1:4646/v1/jobs"
+    THEN both jobs should have "Status":"running" and "Stable":true
+
+  Scenario: Jobs survive Nomad client restart on the specific host
+    GIVEN the jobs "binary" and "pod" are running on "workhorse-01"
+    WHEN the Nomad client service on "workhorse-01" is restarted
+    THEN allocations for both jobs should return to status "running" on "workhorse-01" within 60 seconds
+
+  Scenario: Draining the host stops allocations gracefully
+    GIVEN the jobs "binary" and "pod" are running on "workhorse-01"
+    WHEN I enable drain mode on "workhorse-01" with "force=false"
+    THEN existing allocations should stop gracefully within each task's kill_timeout
+    AND no new allocations should be scheduled on "workhorse-01" while drain is active
+
+
+
+You said:
+now replace instances of "workhorse-01" with "Lab2 (alias)"
+
+
+ChatGPT said:
+Absolutely—here’s the same Gherkin with every occurrence of "workhorse-01" replaced by "Lab2 (alias)".
+
+gherkin
+Copy code
+Feature: Schedule workloads on a specific host with Nomad
+  Nomad should start and stop a binary and a Podman pod on a designated node.
+
+  Background:
+    GIVEN a Nomad cluster with at least one client node registered as "Lab2 (alias)"
+    AND the client node "Lab2 (alias)" has node meta "target=true" and "hostname=Lab2 (alias)"
+    AND the Nomad ACL token with job submit privileges is available
+    AND the "exec" and "podman" task drivers are enabled on "Lab2 (alias)"
+    AND Podman is installed and runnable by the Nomad client user on "Lab2 (alias)"
+    AND network ports required by the workloads are free on "Lab2 (alias)"
+
+  # ---------------------- Binary via exec/raw_exec ----------------------
+
+  Scenario: Start a binary on the specific host
+    GIVEN a Nomad job file "binary.nomad.hcl" with a task "hello-bin" using the "exec" driver
+    AND the task command is "/home/nomadusr/bin/hello" with args "--port" "8081"
+    AND the group has a constraint "node.meta.target == true"
+    AND the group has a constraint "attr.unique.hostname == Lab2 (alias)"
+    WHEN I run "nomad job run binary.nomad.hcl"
+    THEN the job "binary" should be in status "running" within 30 seconds
+    AND the latest allocation should be placed on node "Lab2 (alias)"
+    AND a process named "hello" should be running on "Lab2 (alias)"
+    AND "curl http://127.0.0.1:8081/health" on "Lab2 (alias)" should return HTTP 200
+
+  Scenario: Stop the binary cleanly
+    GIVEN the job "binary" is running on "Lab2 (alias)"
+    WHEN I run "nomad job stop binary"
+    THEN the job "binary" should be in status "dead" within 30 seconds
+    AND there should be no running process named "hello" on "Lab2 (alias)"
+    AND the last allocation status should be "complete" with exit code 0
+
+  Scenario: Restart the binary and remain pinned to the host
+    GIVEN the job "binary" is stopped
+    WHEN I run "nomad job run binary.nomad.hcl"
+    THEN the job "binary" should be in status "running"
+    AND the allocation should be on node "Lab2 (alias)" (not any other node)
+
+  Scenario: Binary restarts on task failure
+    GIVEN the job "binary" has a restart stanza "attempts = 3, mode = delay, interval = 30s"
+    AND the process "hello" exits with a non-zero code
+    WHEN Nomad detects the failed allocation
+    THEN Nomad should restart the task within the configured interval
+    AND the allocation status should become "running" again on "Lab2 (alias)"
+
+  Scenario: Constraint prevents scheduling on a non-target host
+    GIVEN another client node "workhorse-02" is registered without node meta "target=true"
+    WHEN I drain "Lab2 (alias)"
+    THEN the job "binary" should not start on "workhorse-02"
+    AND the job should remain "pending" with a constraint evaluation message referencing "node.meta.target"
+
+  # ---------------------- Podman pod ----------------------
+
+  Scenario: Start a Podman pod on the specific host
+    GIVEN a Nomad job file "pod.nomad.hcl" with a group "api" using the "podman" driver
+    AND the task "api-pod" image is "docker.io/library/nginx:stable"
+    AND the task maps port "http" to host port 8082
+    AND the group has a constraint "attr.unique.hostname == Lab2 (alias)"
+    WHEN I run "nomad job run pod.nomad.hcl"
+    THEN the job "pod" should be in status "running" within 60 seconds
+    AND the allocation should be on node "Lab2 (alias)"
+    AND "curl http://127.0.0.1:8082" on "Lab2 (alias)" should return HTTP 200
+
+  Scenario: Stop the Podman pod cleanly
+    GIVEN the job "pod" is running on "Lab2 (alias)"
+    WHEN I run "nomad job stop pod"
+    THEN the job "pod" should be in status "dead" within 60 seconds
+    AND no Podman container from the job "pod" should be running on "Lab2 (alias)"
+    AND the last allocation status should be "complete" with exit code 0
+
+  Scenario: Podman pod restarts on container crash
+    GIVEN the job "pod" has a restart stanza "attempts = 5, delay = 10s, mode = delay"
+    AND the container process exits non-zero
+    WHEN Nomad detects the failed allocation
+    THEN Nomad should restart the container within the configured delay
+    AND the allocation should return to "running" on "Lab2 (alias)"
+
+  Scenario: Podman image pulled only when absent
+    GIVEN the job "pod" sets "force_pull = false" in the podman config
+    AND the image "docker.io/library/nginx:stable" is already present on "Lab2 (alias)"
+    WHEN I run "nomad job run pod.nomad.hcl"
+    THEN the allocation should start without pulling the image
+    AND the task event stream should not contain a "pulled image" event
+
+  Scenario: Rolling update of the Podman pod (count = 1)
+    GIVEN the job "pod" has update stanza "max_parallel = 1, health_check = 'checks', min_healthy_time = '10s'"
+    AND the group count is 1
+    WHEN I change the image tag to "nginx:stable-perl" and run "nomad job run -check-index pod.nomad.hcl"
+    THEN the old allocation should stop only after the new allocation is healthy on "Lab2 (alias)"
+    AND there should never be more than 1 running allocation during the update
+
+  # ---------------------- Common assertions ----------------------
+
+  Scenario: Health checks report passing for both jobs
+    GIVEN the jobs "binary" and "pod" are running
+    WHEN I query "http://127.0.0.1:4646/v1/jobs"
+    THEN both jobs should have "Status":"running" and "Stable":true
+
+  Scenario: Jobs survive Nomad client restart on the specific host
+    GIVEN the jobs "binary" and "pod" are running on "Lab2 (alias)"
+    WHEN the Nomad client service on "Lab2 (alias)" is restarted
+    THEN allocations for both jobs should return to status "running" on "Lab2 (alias)" within 60 seconds
+
+  Scenario: Draining the host stops allocations gracefully
+    GIVEN the jobs "binary" and "pod" are running on "Lab2 (alias)"
+    WHEN I enable drain mode on "Lab2 (alias)" with "force=false"
+    THEN existing allocations should stop gracefully within each task's kill_timeout
+    AND no new allocations should be scheduled on "Lab2 (alias)" while drain is active
 ```
