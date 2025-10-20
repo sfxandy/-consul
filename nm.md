@@ -111,3 +111,49 @@ bind_addr = "0.0.0.0"
 log_level = "{{ nomad_log_level | default('INFO') }}"
 
 ```
+
+
+
+
+
+
+```
+# ==========================================================
+#  Nomad global configuration
+#  (shared by server and client agents)
+# ==========================================================
+
+# Directory where Nomad stores its state, logs, and data.
+data_dir = "{{ nomad_data_dir | default(ansible_user_dir ~ '/.local/share/nomad') }}"
+
+# Human-readable node name
+node_name = "{{ inventory_hostname }}"
+
+# Nomad API bind address
+bind_addr = "{{ nomad_bind_addr | default('0.0.0.0') }}"
+
+# Logging verbosity: "TRACE", "DEBUG", "INFO", "WARN", or "ERR"
+log_level = "{{ nomad_log_level | default('INFO') }}"
+
+# Optional: telemetry and metrics
+telemetry {
+  collection_interval = "10s"
+  disable_hostname    = false
+  prometheus_metrics  = true
+}
+
+# Optional: enable the built-in web UI
+ui = {{ nomad_enable_ui | default(true) | lower }}
+
+# Optional: ACLs (disabled by default)
+acl {
+  enabled = {{ nomad_enable_acl | default(false) | lower }}
+}
+
+# Optional: advertise addresses — overrides bind if needed
+advertise {
+  http = "{{ nomad_advertise_http | default(hostvars[inventory_hostname]['ansible_default_ipv4']['address'] ~ ':4646') }}"
+  rpc  = "{{ nomad_advertise_rpc  | default(hostvars[inventory_hostname]['ansible_default_ipv4']['address'] ~ ':4647') }}"
+  serf = "{{ nomad_advertise_serf | default(hostvars[inventory_hostname]['ansible_default_ipv4']['address'] ~ ':4648') }}"
+}
+```
