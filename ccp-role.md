@@ -2,7 +2,7 @@
 
 #!/bin/sh
 # cplaneadm-lite — tiny POSIX helper for Consul under podman-compose / podman compose
-# v0.2 — adds `check-secrets`, expands all functions to multi-line bodies.
+# v0.3 — adds `check-secrets`, expands all functions to multi-line bodies.
 # Goals:
 #   - Minimal, readable, and easy to audit
 #   - Podman-only, compose-file driven
@@ -13,7 +13,7 @@
 
 set -eu
 
-VERSION="0.2"
+VERSION="0.3"
 SELF="$(basename "$0")"
 
 # -------- defaults --------
