@@ -26,15 +26,9 @@ SEL_SERVER=false
 SEL_AGENT=false
 
 # -------- helpers --------
-err() {
-  printf 'ERROR: %s
-' "$*" 1>&2
-}
+err(){ printf 'ERROR: %s\n' "$*" 1>&2; }
 
-info() {
-  printf '%s
-' "$*"
-}
+info(){ printf '%s\n' "$*"; }
 
 usage() {
   cat <<USG
