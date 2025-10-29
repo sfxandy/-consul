@@ -1,10 +1,7 @@
 ```bash
 
 ---
-# GMT discovery (clean version)
-# - Never touches undefined attrs
-# - Works with tags
-# - Publishes to hostvars[consul_api_host] and a global fallback
+# GMT discovery (clean, fixed)
 
 # 0) Short-circuit if already present
 - name: GMT | already cached on consul_api_host?
@@ -33,7 +30,7 @@
   no_log: true
   tags: [always]
 
-# 2) Derive a single safe value from the dump (empty string if absent)
+# 2) Derive safe dump value ('' if absent)
 - name: GMT | derive safe dump value
   set_fact:
     _gmt_from_dump: >-
@@ -45,7 +42,7 @@
   no_log: true
   tags: [always]
 
-# 3) Build candidates and publish effective GMT
+# 3) Build candidates
 - name: GMT | collect candidates
   set_fact:
     _gmt_candidates:
@@ -53,7 +50,7 @@
       - "{{ consul_management_token | default('', true) }}"
       - "{{ lookup('env', 'CONSUL_HTTP_TOKEN') | default('', true) }}"
       - "{{ _gmt_from_dump }}"
-      # Optional secret backends (uncomment one you use):
+      # Optional backends (uncomment one you use):
       # - "{{ lookup('community.hashi_vault.hashi_vault', 'secret=kv/data/consul_gmt field=gmt token=' ~ lookup('env','VAULT_TOKEN')) | default('', true) }}"
       # - "{{ lookup('passwordstore', 'consul/gmt') | default('', true) }}"
       # - "{{ lookup('file', playbook_dir ~ '/.secrets/consul_gmt.txt') | default('', true) }}"
@@ -61,9 +58,19 @@
   no_log: true
   tags: [always]
 
+# 4) Pick first non-empty candidate; publish to consul_api_host and global
 - name: GMT | publish effective token to consul_api_host
   set_fact:
-    consul_mgmt_token_eff: "{{ (_gmt_candidates | select('length') | list | first) | default('') }}"
+    consul_mgmt_token_eff: >-
+      {{
+        (_gmt_candidates
+          | map('default','')
+          | map('string')
+          | map('trim')
+          | reject('equalto','')
+          | list
+          | first) | default('')
+      }}
   run_once: true
   delegate_to: "{{ consul_api_host }}"
   delegate_facts: true
@@ -77,7 +84,7 @@
   no_log: true
   tags: [always]
 
-# 4) Only fail if tags REQUIRE GMT and bootstrap isn’t requested
+# 5) Determine if GMT required for this run
 - name: GMT | compute requirement for this run
   set_fact:
     _gmt_required_tags: "{{ consul_gmt_required_tags }}"
@@ -86,7 +93,8 @@
   run_once: true
   tags: [always]
 
-- name: GMT | fail if required but missing (and not bootstrapping)
+# 6) Fail only if required & missing & not bootstrapping now
+- name: GMT | fail if required but missing (and bootstrap not requested)
   assert:
     that: consul_mgmt_token_eff_global | length > 0
     fail_msg: >
