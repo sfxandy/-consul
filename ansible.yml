@@ -1,54 +1,49 @@
-- name: Derive status URLs + curl TLS args
+---
+# Host-side API calls (no container exec); idempotent PUT-by-name upserts.
+
+- name: Compute base URL, token and TLS params
   set_fact:
-    _status_leader_url: >-
+    _api_base: >-
       {{
         (consul_api_use_https | bool)
-        | ternary('https://127.0.0.1:' ~ consul_https_port ~ '/v1/status/leader',
-                  'http://127.0.0.1:8500/v1/status/leader')
+        | ternary('https://127.0.0.1:' ~ consul_https_port|string,
+                  'http://127.0.0.1:8500')
       }}
-    _curl_tls: >-
-      {{
-        (consul_api_use_https | bool)
-        | ternary('--cacert ' ~ consul_tls_ca_path, '')
-      }}
+    _gmt_eff: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+    _uri_validate: "{{ (consul_api_use_https | bool) | ternary(true, false) }}"
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-
-- name: Wait for leader (status endpoint, tokenless)
-  command: >
-    podman exec {{ consul_server_container }} sh -lc
-    "curl -fs {{ _curl_tls }} {{ _status_leader_url }} | grep -qE '\".+:[0-9]+\"'"
-  register: _leader
-  retries: 40
-  delay: 3
-  until: _leader.rc == 0
-
-
-
-
-
-
-  - name: Verify leader exists (status endpoint)
-  command: >
-    podman exec {{ consul_server_container }} sh -lc
-    "curl -fs {{ _curl_tls }} {{ _status_leader_url }} | grep -qE '\".+:[0-9]+\"'"
-  register: _leader_check
-  changed_when: false
-
-- name: Assert leader exists
+- name: Assert policies + token available
   assert:
-    that: _leader_check.rc == 0
-    fail_msg: "No leader from /v1/status/leader (curl failed or empty)."
+    that:
+      - consul_policies | length > 0
+      - (_gmt_eff | length) > 0
+      - consul_policies | map(attribute='file') | map('string') | list | length == (consul_policies | length)
+    fail_msg: "Need consul_policies with valid 'file' paths and a GMT (bootstrap first or provide CONSUL_HTTP_TOKEN)."
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-
-
-
-- name: Server | wait for leader post-restart (status endpoint)
-  command: >
-    podman exec {{ consul_server_container }} sh -lc
-    "curl -fs {{ _curl_tls }} {{ _status_leader_url }} | grep -qE '\".+:[0-9]+\"'"
-  register: _leader_after_srv
-  retries: 40
-  delay: 3
-  until: _leader_after_srv.rc == 0
+# Upsert all policies via loop
+- name: Upsert policies (PUT /v1/acl/policy/name/{name})
+  uri:
+    url: "{{ _api_base }}/v1/acl/policy/name/{{ item.name | urlencode }}"
+    method: PUT
+    headers:
+      X-Consul-Token: "{{ _gmt_eff }}"
+    body_format: json
+    body:
+      Name: "{{ item.name }}"
+      Rules: "{{ _rules }}"
+      Description: "{{ item.description | default(omit) }}"
+    return_content: false
+    status_code: [200]         # create/update both return 200 for PUT-by-name
+    validate_certs: "{{ _uri_validate }}"
+    # ca_path: "{{ consul_tls_ca_host_path | default(omit) }}"  # set if you pin a CA on host
+  vars:
+    _rules: "{{ lookup('file', item.file) | trim }}"
+  loop: "{{ consul_policies }}"
+  loop_control:
+    label: "{{ item.name }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
