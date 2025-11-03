@@ -30,118 +30,118 @@
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# ----------------------
-# Restart SERVERS (one-by-one)
-# ----------------------
+# Restart SERVERS one-by-one
 - name: Rolling restart | servers
-  vars:
-    _chdir: "{{ compose_repo_root }}"
+  include_tasks: restart_server_one.yml
   loop: "{{ groups['consul_hosts'] }}"
-  loop_control: { loop_var: tgt }
-  block:
+  loop_control:
+    loop_var: tgt
 
-    - name: Server | stop
-      command: podman-compose -f {{ compose_repo_compose }} stop consul-server
-      args: { chdir: "{{ _chdir }}" }
-      delegate_to: "{{ tgt }}"
-      register: _stop_srv
-      failed_when: false
-      changed_when: _stop_srv.rc == 0
-
-    - name: Server | up
-      command: podman-compose -f {{ compose_repo_compose }} up -d consul-server
-      args: { chdir: "{{ _chdir }}" }
-      delegate_to: "{{ tgt }}"
-      register: _up_srv
-      changed_when: _up_srv.rc == 0
-
-    # After each server restart, ensure a leader exists again
-    - name: Server | wait for leader post-restart
-      command: >
-        podman exec
-        {{ consul_server_container }}
-        sh -lc "consul operator raft list-peers | tail -n +2 | awk '{print $3}' | grep -iq '^leader$'"
-      register: _leader_after_srv
-      retries: 40
-      delay: 3
-      until: _leader_after_srv.rc == 0
-      run_once: true
-      delegate_to: "{{ consul_api_host }}"
-
-    # Probe ACLs on this server (inside its container)
-    - name: Server | check ACL state (HTTP code)
-      command: >
-        podman exec {{ consul_server_container }} sh -lc
-        "curl -s -o /dev/null -w '%{http_code}' {{ _acl_probe_tls }} {{ _acl_probe_url }}"
-      delegate_to: "{{ tgt }}"
-      register: _srv_acl
-      changed_when: false
-
-    - name: Server | set ACL booleans
-      set_fact:
-        _srv_acl_code: "{{ _srv_acl.stdout | trim }}"
-        _srv_acl_enabled: "{{ (_srv_acl.stdout | trim) != '404' }}"
-        _srv_acl_bootstrapped: "{{ (_srv_acl.stdout | trim) == '403' }}"
-
-    - name: Server | assert ACLs enabled
-      assert:
-        that: _srv_acl_enabled | bool
-        fail_msg: >-
-          ACLs appear DISABLED on {{ tgt }} (HTTP code {{ _srv_acl_code }} from /v1/acl/bootstrap).
-          Ensure 90-acl.hcl is present and the container was restarted cleanly.
-
-# ----------------------
-# Restart AGENTS (one-by-one on same hosts)
-# ----------------------
+# Restart AGENTS one-by-one
 - name: Rolling restart | agents
-  vars:
-    _chdir: "{{ compose_repo_root }}"
+  include_tasks: restart_agent_one.yml
   loop: "{{ groups['consul_hosts'] }}"
-  loop_control: { loop_var: tgt }
-  block:
+  loop_control:
+    loop_var: tgt
 
-    - name: Agent | stop
-      command: podman-compose -f {{ compose_repo_compose }} stop consul-agent
-      args: { chdir: "{{ _chdir }}" }
-      delegate_to: "{{ tgt }}"
-      register: _stop_cli
-      failed_when: false
-      changed_when: _stop_cli.rc == 0
 
-    - name: Agent | up
-      command: podman-compose -f {{ compose_repo_compose }} up -d consul-agent
-      args: { chdir: "{{ _chdir }}" }
-      delegate_to: "{{ tgt }}"
-      register: _up_cli
-      changed_when: _up_cli.rc == 0
 
-    # Light sanity: agent is responsive
-    - name: Agent | consul info check
-      command: podman exec {{ consul_client_container }} consul info
-      delegate_to: "{{ tgt }}"
-      register: _cli_info
-      retries: 20
-      delay: 2
-      until: _cli_info.rc == 0
+---
+# Expects: tgt, compose_repo_root, compose_repo_compose, consul_server_container,
+#          consul_api_host, _acl_probe_url, _acl_probe_tls
 
-    # Probe ACLs on this agent (inside its container)
-    - name: Agent | check ACL state (HTTP code)
-      command: >
-        podman exec {{ consul_client_container }} sh -lc
-        "curl -s -o /dev/null -w '%{http_code}' {{ _acl_probe_tls }} {{ _acl_probe_url }}"
-      delegate_to: "{{ tgt }}"
-      register: _cli_acl
-      changed_when: false
+- name: Server {{ tgt }} | stop
+  command: podman-compose -f {{ compose_repo_compose }} stop consul-server
+  args:
+    chdir: "{{ compose_repo_root }}"
+  delegate_to: "{{ tgt }}"
+  register: _stop_srv
+  failed_when: false
+  changed_when: _stop_srv.rc == 0
 
-    - name: Agent | set ACL booleans
-      set_fact:
-        _cli_acl_code: "{{ _cli_acl.stdout | trim }}"
-        _cli_acl_enabled: "{{ (_cli_acl.stdout | trim) != '404' }}"
-        _cli_acl_bootstrapped: "{{ (_cli_acl.stdout | trim) == '403' }}"
+- name: Server {{ tgt }} | up
+  command: podman-compose -f {{ compose_repo_compose }} up -d consul-server
+  args:
+    chdir: "{{ compose_repo_root }}"
+  delegate_to: "{{ tgt }}"
+  register: _up_srv
+  changed_when: _up_srv.rc == 0
 
-    - name: Agent | assert ACLs enabled
-      assert:
-        that: _cli_acl_enabled | bool
-        fail_msg: >-
-          ACLs appear DISABLED on agent at {{ tgt }} (HTTP code {{ _cli_acl_code }} from /v1/acl/bootstrap).
-          Ensure 90-acl.hcl is present and the container was restarted cleanly.
+# After each server restart, ensure a leader exists again
+- name: Server {{ tgt }} | wait for leader post-restart
+  command: >
+    podman exec
+    {{ consul_server_container }}
+    sh -lc "consul operator raft list-peers | tail -n +2 | awk '{print $3}' | grep -iq '^leader$'"
+  register: _leader_after_srv
+  retries: 40
+  delay: 3
+  until: _leader_after_srv.rc == 0
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# Probe ACLs on this server (inside its container)
+- name: Server {{ tgt }} | check ACL state (HTTP code)
+  command: >
+    podman exec {{ consul_server_container }} sh -lc
+    "curl -s -o /dev/null -w '%{http_code}' {{ _acl_probe_tls }} {{ _acl_probe_url }}"
+  delegate_to: "{{ tgt }}"
+  register: _srv_acl
+  changed_when: false
+
+- name: Server {{ tgt }} | assert ACLs enabled
+  assert:
+    that:
+      - (_srv_acl.stdout | trim) != '404'
+    fail_msg: >-
+      ACLs appear DISABLED on {{ tgt }} (HTTP {{ _srv_acl.stdout | trim }} from /v1/acl/bootstrap).
+      Ensure 90-acl.hcl is present and the container was restarted cleanly.
+
+
+---
+# Expects: tgt, compose_repo_root, compose_repo_compose, consul_client_container,
+#          _acl_probe_url, _acl_probe_tls
+
+- name: Agent {{ tgt }} | stop
+  command: podman-compose -f {{ compose_repo_compose }} stop consul-agent
+  args:
+    chdir: "{{ compose_repo_root }}"
+  delegate_to: "{{ tgt }}"
+  register: _stop_cli
+  failed_when: false
+  changed_when: _stop_cli.rc == 0
+
+- name: Agent {{ tgt }} | up
+  command: podman-compose -f {{ compose_repo_compose }} up -d consul-agent
+  args:
+    chdir: "{{ compose_repo_root }}"
+  delegate_to: "{{ tgt }}"
+  register: _up_cli
+  changed_when: _up_cli.rc == 0
+
+# Light sanity: agent is responsive
+- name: Agent {{ tgt }} | consul info check
+  command: podman exec {{ consul_client_container }} consul info
+  delegate_to: "{{ tgt }}"
+  register: _cli_info
+  retries: 20
+  delay: 2
+  until: _cli_info.rc == 0
+
+# Probe ACLs on this agent (inside its container)
+- name: Agent {{ tgt }} | check ACL state (HTTP code)
+  command: >
+    podman exec {{ consul_client_container }} sh -lc
+    "curl -s -o /dev/null -w '%{http_code}' {{ _acl_probe_tls }} {{ _acl_probe_url }}"
+  delegate_to: "{{ tgt }}"
+  register: _cli_acl
+  changed_when: false
+
+- name: Agent {{ tgt }} | assert ACLs enabled
+  assert:
+    that:
+      - (_cli_acl.stdout | trim) != '404'
+    fail_msg: >-
+      ACLs appear DISABLED on agent at {{ tgt }} (HTTP {{ _cli_acl.stdout | trim }} from /v1/acl/bootstrap).
+      Ensure 90-acl.hcl is present and the container was restarted cleanly.
+
