@@ -1,88 +1,60 @@
 ---
-# Mint per-node agent tokens (server + client) and publish a map:
-#   consul_agent_tokens_map: { <node_name>: <SecretID>, ... }
+# Create/refresh Podman secrets per host (server + agent) without Galaxy modules.
+# Reads token values from the consul_api_host's consul_agent_tokens_map.
 
-- name: Compute CLI env for HTTPS if enabled
-  set_fact:
-    _cli_env: >-
-      {{
-        consul_api_use_https
-        | ternary(
-            {
-              'CONSUL_HTTP_ADDR': 'https://127.0.0.1:' ~ consul_https_port|string,
-              'CONSUL_CACERT': consul_tls_ca_path,
-              'CONSUL_CLIENT_CERT': consul_tls_client_cert,
-              'CONSUL_CLIENT_KEY': consul_tls_client_key
-            },
-            { 'CONSUL_HTTP_ADDR': 'http://127.0.0.1:8500' }
-          )
-      }}
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
-
-- name: Init token map
-  set_fact:
-    consul_agent_tokens_map: {}
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
-  delegate_facts: true
-
-- name: Create tokens for server/agent per host
-  vars:
-    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+- name: Ensure per-host secrets exist (server+agent)
   loop: "{{ groups['consul_hosts'] }}"
   loop_control:
     loop_var: tgt
     label: "{{ tgt }}"
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
+  delegate_to: "{{ tgt }}"
   block:
 
-    - name: Derive node names for {{ tgt }}
+    - name: Derive node + secret names for {{ tgt }}
       set_fact:
         _srv_node: "{{ hostvars[tgt].consul_server_node_name }}"
         _cli_node: "{{ hostvars[tgt].consul_client_node_name }}"
+        _srv_secret: "consul_agent_token_{{ hostvars[tgt].consul_server_node_name }}"
+        _cli_secret: "consul_agent_token_{{ hostvars[tgt].consul_client_node_name }}"
 
-    - name: Create token (server node {{ _srv_node }})
-      command: >
-        podman exec
-        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
-        {{ consul_server_container }}
-        consul acl token create
-        -description "Agent token for {{ _srv_node }}"
-        -policy-name {{ consul_policy_server_name | quote }}
-        -format=json
-        -token {{ _gmt }}
-      register: _t_srv
-      changed_when: true
+    # ----- Server secret -----
+    - name: Check if server secret exists ({{ _srv_secret }})
+      command: podman secret inspect {{ _srv_secret }}
+      register: _srv_secret_inspect
+      failed_when: false
+      changed_when: false
 
-    - name: Record server token
-      set_fact:
-        consul_agent_tokens_map: >-
-          {{
-            consul_agent_tokens_map
-            | combine({ _srv_node: (_t_srv.stdout | from_json).SecretID })
-          }}
-      delegate_facts: true
+    - name: Remove existing server secret ({{ _srv_secret }})
+      command: podman secret rm {{ _srv_secret }}
+      when: _srv_secret_inspect.rc == 0
+      register: _srv_secret_rm
+      changed_when: _srv_secret_rm.rc == 0
 
-    - name: Create token (client node {{ _cli_node }})
-      command: >
-        podman exec
-        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
-        {{ consul_server_container }}
-        consul acl token create
-        -description "Agent token for {{ _cli_node }}"
-        -policy-name {{ consul_policy_client_name | quote }}
-        -format=json
-        -token {{ _gmt }}
-      register: _t_cli
-      changed_when: true
+    - name: Create server secret ({{ _srv_secret }})
+      shell: podman secret create {{ _srv_secret }} -
+      args:
+        stdin: "{{ hostvars[consul_api_host].consul_agent_tokens_map[_srv_node] }}"
+      no_log: true
+      register: _srv_secret_create
+      changed_when: _srv_secret_create.rc == 0
 
-    - name: Record client token
-      set_fact:
-        consul_agent_tokens_map: >-
-          {{
-            consul_agent_tokens_map
-            | combine({ _cli_node: (_t_cli.stdout | from_json).SecretID })
-          }}
-      delegate_facts: true
+    # ----- Agent secret -----
+    - name: Check if client secret exists ({{ _cli_secret }})
+      command: podman secret inspect {{ _cli_secret }}
+      register: _cli_secret_inspect
+      failed_when: false
+      changed_when: false
+
+    - name: Remove existing client secret ({{ _cli_secret }})
+      command: podman secret rm {{ _cli_secret }}
+      when: _cli_secret_inspect.rc == 0
+      register: _cli_secret_rm
+      changed_when: _cli_secret_rm.rc == 0
+
+    - name: Create client secret ({{ _cli_secret }})
+      shell: podman secret create {{ _cli_secret }} -
+      args:
+        stdin: "{{ hostvars[consul_api_host].consul_agent_tokens_map[_cli_node] }}"
+      no_log: true
+      register: _cli_secret_create
+      changed_when: _cli_secret_create.rc == 0
