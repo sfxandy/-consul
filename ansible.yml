@@ -1,5 +1,5 @@
 ---
-# Host-side API calls (no container exec); idempotent PUT-by-name upserts.
+# Upsert policies via Consul HTTP API from consul_api_host
 
 - name: Compute base URL, token and TLS params
   set_fact:
@@ -10,7 +10,7 @@
                   'http://127.0.0.1:8500')
       }}
     _gmt_eff: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
-    _uri_validate: "{{ (consul_api_use_https | bool) | ternary(true, false) }}"
+    _validate: "{{ (consul_api_use_https | bool) | ternary(true, false) }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
@@ -19,31 +19,61 @@
     that:
       - consul_policies | length > 0
       - (_gmt_eff | length) > 0
-      - consul_policies | map(attribute='file') | map('string') | list | length == (consul_policies | length)
-    fail_msg: "Need consul_policies with valid 'file' paths and a GMT (bootstrap first or provide CONSUL_HTTP_TOKEN)."
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# Upsert all policies via loop
-- name: Upsert policies (PUT /v1/acl/policy/name/{name})
+# 1) Read each policy by name (200 = exists, 404 = not found)
+- name: Read policy by name
   uri:
     url: "{{ _api_base }}/v1/acl/policy/name/{{ item.name | urlencode }}"
+    method: GET
+    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
+    return_content: true
+    status_code: [200, 404]
+    validate_certs: "{{ _validate }}"
+  register: _pol_read
+  loop: "{{ consul_policies }}"
+  loop_control: { label: "{{ item.name }}" }
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# 2a) Create when not found (PUT /v1/acl/policy)
+- name: Create policy (not found)
+  uri:
+    url: "{{ _api_base }}/v1/acl/policy"
     method: PUT
-    headers:
-      X-Consul-Token: "{{ _gmt_eff }}"
+    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
     body_format: json
     body:
-      Name: "{{ item.name }}"
-      Rules: "{{ _rules }}"
-      Description: "{{ item.description | default(omit) }}"
+      Name: "{{ item.item.name }}"
+      Description: "{{ item.item.description | default(omit) }}"
+      Rules: "{{ (lookup('file', item.item.file) | trim) }}"
     return_content: false
-    status_code: [200]         # create/update both return 200 for PUT-by-name
-    validate_certs: "{{ _uri_validate }}"
-    # ca_path: "{{ consul_tls_ca_host_path | default(omit) }}"  # set if you pin a CA on host
-  vars:
-    _rules: "{{ lookup('file', item.file) | trim }}"
-  loop: "{{ consul_policies }}"
-  loop_control:
-    label: "{{ item.name }}"
+    status_code: [200]
+    validate_certs: "{{ _validate }}"
+  when: item.status == 404
+  loop: "{{ _pol_read.results }}"
+  loop_control: { label: "{{ item.item.name }}" }
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# 2b) Update when found (need ID) → PUT /v1/acl/policy/:id
+- name: Update policy (exists)
+  uri:
+    url: "{{ _api_base }}/v1/acl/policy/{{ (item.json.ID) }}"
+    method: PUT
+    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
+    body_format: json
+    body:
+      ID: "{{ item.json.ID }}"
+      Name: "{{ item.item.name }}"
+      Description: "{{ item.item.description | default(omit) }}"
+      Rules: "{{ (lookup('file', item.item.file) | trim) }}"
+    return_content: false
+    status_code: [200]
+    validate_certs: "{{ _validate }}"
+  when: item.status == 200
+  loop: "{{ _pol_read.results }}"
+  loop_control: { label: "{{ item.item.name }}" }
   run_once: true
   delegate_to: "{{ consul_api_host }}"
