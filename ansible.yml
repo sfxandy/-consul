@@ -1,79 +1,88 @@
 ---
-# Upsert policies via Consul HTTP API from consul_api_host
+# Mint per-node agent tokens (server + client) and publish a map:
+#   consul_agent_tokens_map: { <node_name>: <SecretID>, ... }
 
-- name: Compute base URL, token and TLS params
+- name: Compute CLI env for HTTPS if enabled
   set_fact:
-    _api_base: >-
+    _cli_env: >-
       {{
-        (consul_api_use_https | bool)
-        | ternary('https://127.0.0.1:' ~ consul_https_port|string,
-                  'http://127.0.0.1:8500')
+        consul_api_use_https
+        | ternary(
+            {
+              'CONSUL_HTTP_ADDR': 'https://127.0.0.1:' ~ consul_https_port|string,
+              'CONSUL_CACERT': consul_tls_ca_path,
+              'CONSUL_CLIENT_CERT': consul_tls_client_cert,
+              'CONSUL_CLIENT_KEY': consul_tls_client_key
+            },
+            { 'CONSUL_HTTP_ADDR': 'http://127.0.0.1:8500' }
+          )
       }}
-    _gmt_eff: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
-    _validate: "{{ (consul_api_use_https | bool) | ternary(true, false) }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-- name: Assert policies + token available
-  assert:
-    that:
-      - consul_policies | length > 0
-      - (_gmt_eff | length) > 0
+- name: Init token map
+  set_fact:
+    consul_agent_tokens_map: {}
   run_once: true
   delegate_to: "{{ consul_api_host }}"
+  delegate_facts: true
 
-# 1) Read each policy by name (200 = exists, 404 = not found)
-- name: Read policy by name
-  uri:
-    url: "{{ _api_base }}/v1/acl/policy/name/{{ item.name | urlencode }}"
-    method: GET
-    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
-    return_content: true
-    status_code: [200, 404]
-    validate_certs: "{{ _validate }}"
-  register: _pol_read
-  loop: "{{ consul_policies }}"
-  loop_control: { label: "{{ item.name }}" }
+- name: Create tokens for server/agent per host
+  vars:
+    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+  loop: "{{ groups['consul_hosts'] }}"
+  loop_control:
+    loop_var: tgt
+    label: "{{ tgt }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
+  block:
 
-# 2a) Create when not found (PUT /v1/acl/policy)
-- name: Create policy (not found)
-  uri:
-    url: "{{ _api_base }}/v1/acl/policy"
-    method: PUT
-    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
-    body_format: json
-    body:
-      Name: "{{ item.item.name }}"
-      Description: "{{ item.item.description | default(omit) }}"
-      Rules: "{{ (lookup('file', item.item.file) | trim) }}"
-    return_content: false
-    status_code: [200]
-    validate_certs: "{{ _validate }}"
-  when: item.status == 404
-  loop: "{{ _pol_read.results }}"
-  loop_control: { label: "{{ item.item.name }}" }
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
+    - name: Derive node names for {{ tgt }}
+      set_fact:
+        _srv_node: "{{ hostvars[tgt].consul_server_node_name }}"
+        _cli_node: "{{ hostvars[tgt].consul_client_node_name }}"
 
-# 2b) Update when found (need ID) → PUT /v1/acl/policy/:id
-- name: Update policy (exists)
-  uri:
-    url: "{{ _api_base }}/v1/acl/policy/{{ (item.json.ID) }}"
-    method: PUT
-    headers: { X-Consul-Token: "{{ _gmt_eff }}" }
-    body_format: json
-    body:
-      ID: "{{ item.json.ID }}"
-      Name: "{{ item.item.name }}"
-      Description: "{{ item.item.description | default(omit) }}"
-      Rules: "{{ (lookup('file', item.item.file) | trim) }}"
-    return_content: false
-    status_code: [200]
-    validate_certs: "{{ _validate }}"
-  when: item.status == 200
-  loop: "{{ _pol_read.results }}"
-  loop_control: { label: "{{ item.item.name }}" }
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
+    - name: Create token (server node {{ _srv_node }})
+      command: >
+        podman exec
+        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+        {{ consul_server_container }}
+        consul acl token create
+        -description "Agent token for {{ _srv_node }}"
+        -policy-name {{ consul_policy_server_name | quote }}
+        -format=json
+        -token {{ _gmt }}
+      register: _t_srv
+      changed_when: true
+
+    - name: Record server token
+      set_fact:
+        consul_agent_tokens_map: >-
+          {{
+            consul_agent_tokens_map
+            | combine({ _srv_node: (_t_srv.stdout | from_json).SecretID })
+          }}
+      delegate_facts: true
+
+    - name: Create token (client node {{ _cli_node }})
+      command: >
+        podman exec
+        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+        {{ consul_server_container }}
+        consul acl token create
+        -description "Agent token for {{ _cli_node }}"
+        -policy-name {{ consul_policy_client_name | quote }}
+        -format=json
+        -token {{ _gmt }}
+      register: _t_cli
+      changed_when: true
+
+    - name: Record client token
+      set_fact:
+        consul_agent_tokens_map: >-
+          {{
+            consul_agent_tokens_map
+            | combine({ _cli_node: (_t_cli.stdout | from_json).SecretID })
+          }}
+      delegate_facts: true
