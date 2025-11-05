@@ -1,9 +1,14 @@
 ---
 # roles/consul_podman_acl_v3/tasks/mint_tokens.yml
-# Mint per-node agent tokens (server + client) and publish a map on consul_api_host:
-#   consul_agent_tokens_map: { <node_name>: <SecretID>, ... }
+# Idempotent per-node token minting with a host-side registry.
 
-# Compute CLI env for HTTPS if enabled (runs on consul_api_host)
+# -------- Settings (can live in defaults/main.yml) --------
+# consul_token_registry_path: "/root/consul-agent-tokens.json"
+# consul_token_registry_owner: "root"
+# consul_token_registry_group: "root"
+# consul_token_registry_mode:  "0600"
+
+# 0) Ensure CLI env (runs on API host)
 - name: Mint | compute CLI env
   set_fact:
     _cli_env: >-
@@ -22,92 +27,97 @@
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# Init token map (host fact on consul_api_host)
-- name: Mint | init token map
-  set_fact:
-    consul_agent_tokens_map: {}
+# 1) Load existing registry (if any)
+- name: Mint | check registry file
+  stat:
+    path: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
+  register: _reg_stat
   run_once: true
   delegate_to: "{{ consul_api_host }}"
-  delegate_facts: true
 
-# Derive server node names for each target host
-- name: Mint | derive server node names
+- name: Mint | slurp registry
+  slurp:
+    path: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
+  register: _reg_slurp
+  when: _reg_stat.stat.exists | default(false)
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  no_log: true
+
+- name: Mint | parse registry json
   set_fact:
-    _srv_node: "{{ hostvars[item].consul_server_node_name }}"
+    _token_registry: >-
+      {{
+        (_reg_stat.stat.exists | default(false))
+        | ternary((_reg_slurp.content | b64decode | from_json), {})
+      }}
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  no_log: true
+
+# 2) Build desired node list (server+client per host)
+- name: Mint | build node list
+  set_fact:
+    _nodes: "{{ (_nodes | default([]))
+               + [ {'node': hostvars[item].consul_server_node_name, 'policy': consul_policy_server_name} ]
+               + [ {'node': hostvars[item].consul_client_node_name, 'policy': consul_policy_client_name} ] }}"
   loop: "{{ groups['consul_hosts'] }}"
   loop_control: { label: "{{ item }}" }
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# Derive client node names for each target host
-- name: Mint | derive client node names
+# 3) Init output map
+- name: Mint | init output map
   set_fact:
-    _cli_node: "{{ hostvars[item].consul_client_node_name }}"
-  loop: "{{ groups['consul_hosts'] }}"
-  loop_control: { label: "{{ item }}" }
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
-
-# Create token for each SERVER node
-- name: Mint | create token (server nodes)
-  vars:
-    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
-    _srv_node: "{{ hostvars[item].consul_server_node_name }}"
-  command: >
-    podman exec
-    {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
-    {{ consul_server_container }}
-    consul acl token create
-    -description "Agent token for {{ _srv_node }}"
-    -policy-name {{ consul_policy_server_name | quote }}
-    -format=json
-    -token {{ _gmt }}
-  register: _t_srv
-  changed_when: true
-  loop: "{{ groups['consul_hosts'] }}"
-  loop_control: { label: "{{ item }} → {{ _srv_node }}" }
-  run_once: true
-  delegate_to: "{{ consul_api_host }}"
-
-# Record each SERVER token into the map
-- name: Mint | record server tokens
-  set_fact:
-    consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ (hostvars[item.item].consul_server_node_name): ((item.stdout | from_json).SecretID) }) }}"
-  loop: "{{ _t_srv.results }}"
-  loop_control: { label: "{{ item.item }} → {{ hostvars[item.item].consul_server_node_name }}" }
+    consul_agent_tokens_map: "{{ _token_registry | default({}) }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
   delegate_facts: true
   no_log: true
 
-# Create token for each CLIENT node
-- name: Mint | create token (client nodes)
+# 4) Mint missing tokens only; reuse those in registry
+- name: Mint | create tokens for missing nodes
   vars:
     _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
-    _cli_node: "{{ hostvars[item].consul_client_node_name }}"
-  command: >
-    podman exec
-    {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
-    {{ consul_server_container }}
-    consul acl token create
-    -description "Agent token for {{ _cli_node }}"
-    -policy-name {{ consul_policy_client_name | quote }}
-    -format=json
-    -token {{ _gmt }}
-  register: _t_cli
-  changed_when: true
-  loop: "{{ groups['consul_hosts'] }}"
-  loop_control: { label: "{{ item }} → {{ _cli_node }}" }
+  when: consul_agent_tokens_map.get(item.node, '') | length == 0
+  loop: "{{ _nodes | unique(attribute='node') }}"
+  loop_control:
+    label: "{{ item.node }}"
   run_once: true
   delegate_to: "{{ consul_api_host }}"
+  block:
 
-# Record each CLIENT token into the map
-- name: Mint | record client tokens
-  set_fact:
-    consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ (hostvars[item.item].consul_client_node_name): ((item.stdout | from_json).SecretID) }) }}"
-  loop: "{{ _t_cli.results }}"
-  loop_control: { label: "{{ item.item }} → {{ hostvars[item.item].consul_client_node_name }}" }
+    - name: Mint | create token ({{ item.node }})
+      command: >
+        podman exec
+        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+        {{ consul_server_container }}
+        consul acl token create
+        -description "Agent token for {{ item.node }}"
+        -policy-name {{ item.policy | quote }}
+        -format=json
+        -token {{ _gmt }}
+      register: _t_new
+      changed_when: true
+
+    - name: Mint | capture SecretID ({{ item.node }})
+      set_fact:
+        consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ item.node: (_t_new.stdout | from_json).SecretID }) }}"
+      delegate_facts: true
+      no_log: true
+
+# 5) Persist registry (only if changed or not present)
+- name: Mint | write updated registry
+  copy:
+    content: "{{ consul_agent_tokens_map | to_nice_json }}"
+    dest: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
+    owner: "{{ consul_token_registry_owner | default('root') }}"
+    group: "{{ consul_token_registry_group | default('root') }}"
+    mode: "{{ consul_token_registry_mode | default('0600') }}"
+  when: >
+    (not _reg_stat.stat.exists | default(false))
+    or (consul_agent_tokens_map != (_token_registry | default({})))
   run_once: true
   delegate_to: "{{ consul_api_host }}"
-  delegate_facts: true
   no_log: true
+
