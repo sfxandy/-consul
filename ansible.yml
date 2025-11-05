@@ -1,80 +1,113 @@
-
 ---
-# Build a flat list of secrets to (re)create, then handle each with include_tasks.
+# roles/consul_podman_acl_v3/tasks/mint_tokens.yml
+# Mint per-node agent tokens (server + client) and publish a map on consul_api_host:
+#   consul_agent_tokens_map: { <node_name>: <SecretID>, ... }
 
-- name: Init secret items
+# Compute CLI env for HTTPS if enabled (runs on consul_api_host)
+- name: Mint | compute CLI env
   set_fact:
-    _secret_items: []
+    _cli_env: >-
+      {{
+        consul_api_use_https
+        | ternary(
+            {
+              'CONSUL_HTTP_ADDR': 'https://127.0.0.1:' ~ (consul_https_port|string),
+              'CONSUL_CACERT': consul_tls_ca_path,
+              'CONSUL_CLIENT_CERT': consul_tls_client_cert,
+              'CONSUL_CLIENT_KEY': consul_tls_client_key
+            },
+            { 'CONSUL_HTTP_ADDR': 'http://127.0.0.1:8500' }
+          )
+      }}
   run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-- name: Collect per-host secret items (server + agent)
+# Init token map (host fact on consul_api_host)
+- name: Mint | init token map
   set_fact:
-    _secret_items: "{{ _secret_items + [
-      {
-        'host': item,
-        'node': hostvars[item].consul_server_node_name,
-        'secret_name': 'consul_agent_token_' ~ hostvars[item].consul_server_node_name
-      },
-      {
-        'host': item,
-        'node': hostvars[item].consul_client_node_name,
-        'secret_name': 'consul_agent_token_' ~ hostvars[item].consul_client_node_name
-      }
-    ] }}"
+    consul_agent_tokens_map: {}
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  delegate_facts: true
+
+# Derive server node names for each target host
+- name: Mint | derive server node names
+  set_fact:
+    _srv_node: "{{ hostvars[item].consul_server_node_name }}"
   loop: "{{ groups['consul_hosts'] }}"
+  loop_control: { label: "{{ item }}" }
   run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-- name: Ensure Podman secrets exist (server + agent per host)
-  include_tasks: secrets_one.yml
-  loop: "{{ _secret_items }}"
-  loop_control:
-    label: "{{ item.host }} -> {{ item.secret_name }}"
-
-
-
-
-
-
-
-
-
-
-
----
-# Expects item = { host, node, secret_name }
-# Reads token value from consul_api_host's consul_agent_tokens_map[item.node]
-
-- name: Lookup token value for {{ item.node }}
+# Derive client node names for each target host
+- name: Mint | derive client node names
   set_fact:
-    _secret_value: "{{ hostvars[consul_api_host].consul_agent_tokens_map[item.node] | default('') }}"
-  no_log: true
+    _cli_node: "{{ hostvars[item].consul_client_node_name }}"
+  loop: "{{ groups['consul_hosts'] }}"
+  loop_control: { label: "{{ item }}" }
   run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-- name: Assert token value present for {{ item.node }}
-  assert:
-    that: _secret_value | length > 0
-    fail_msg: "No token found for node {{ item.node }} in consul_agent_tokens_map on {{ consul_api_host }}."
+# Create token for each SERVER node
+- name: Mint | create token (server nodes)
+  vars:
+    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+    _srv_node: "{{ hostvars[item].consul_server_node_name }}"
+  command: >
+    podman exec
+    {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+    {{ consul_server_container }}
+    consul acl token create
+    -description "Agent token for {{ _srv_node }}"
+    -policy-name {{ consul_policy_server_name | quote }}
+    -format=json
+    -token {{ _gmt }}
+  register: _t_srv
+  changed_when: true
+  loop: "{{ groups['consul_hosts'] }}"
+  loop_control: { label: "{{ item }} → {{ _srv_node }}" }
   run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-- name: Check if secret exists ({{ item.secret_name }})
-  command: podman secret inspect {{ item.secret_name }}
-  register: _inspect
-  failed_when: false
-  changed_when: false
-  delegate_to: "{{ item.host }}"
-
-- name: Remove existing secret ({{ item.secret_name }})
-  command: podman secret rm {{ item.secret_name }}
-  when: _inspect.rc == 0
-  register: _rm
-  changed_when: _rm.rc == 0
-  delegate_to: "{{ item.host }}"
-
-- name: Create secret ({{ item.secret_name }}) from stdin
-  shell: podman secret create {{ item.secret_name }} -
-  args:
-    stdin: "{{ _secret_value }}"
+# Record each SERVER token into the map
+- name: Mint | record server tokens
+  set_fact:
+    consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ (hostvars[item.item].consul_server_node_name): ((item.stdout | from_json).SecretID) }) }}"
+  loop: "{{ _t_srv.results }}"
+  loop_control: { label: "{{ item.item }} → {{ hostvars[item.item].consul_server_node_name }}" }
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  delegate_facts: true
   no_log: true
-  register: _create
-  changed_when: _create.rc == 0
-  delegate_to: "{{ item.host }}"
+
+# Create token for each CLIENT node
+- name: Mint | create token (client nodes)
+  vars:
+    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+    _cli_node: "{{ hostvars[item].consul_client_node_name }}"
+  command: >
+    podman exec
+    {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+    {{ consul_server_container }}
+    consul acl token create
+    -description "Agent token for {{ _cli_node }}"
+    -policy-name {{ consul_policy_client_name | quote }}
+    -format=json
+    -token {{ _gmt }}
+  register: _t_cli
+  changed_when: true
+  loop: "{{ groups['consul_hosts'] }}"
+  loop_control: { label: "{{ item }} → {{ _cli_node }}" }
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# Record each CLIENT token into the map
+- name: Mint | record client tokens
+  set_fact:
+    consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ (hostvars[item.item].consul_client_node_name): ((item.stdout | from_json).SecretID) }) }}"
+  loop: "{{ _t_cli.results }}"
+  loop_control: { label: "{{ item.item }} → {{ hostvars[item.item].consul_client_node_name }}" }
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  delegate_facts: true
+  no_log: true
