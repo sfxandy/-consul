@@ -1,14 +1,8 @@
 ---
-# roles/consul_podman_acl_v3/tasks/mint_tokens.yml
-# Idempotent per-node token minting with a host-side registry.
+# Idempotent per-node token minting with a host-side registry
+# Writes/reads: consul_token_registry_path (default: /root/consul-agent-tokens.json)
 
-# -------- Settings (can live in defaults/main.yml) --------
-# consul_token_registry_path: "/root/consul-agent-tokens.json"
-# consul_token_registry_owner: "root"
-# consul_token_registry_group: "root"
-# consul_token_registry_mode:  "0600"
-
-# 0) Ensure CLI env (runs on API host)
+# 0) CLI env on API host
 - name: Mint | compute CLI env
   set_fact:
     _cli_env: >-
@@ -27,7 +21,7 @@
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# 1) Load existing registry (if any)
+# 1) Load registry (if present)
 - name: Mint | check registry file
   stat:
     path: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
@@ -66,7 +60,13 @@
   run_once: true
   delegate_to: "{{ consul_api_host }}"
 
-# 3) Init output map
+- name: Mint | unique node list
+  set_fact:
+    _nodes_unique: "{{ _nodes | unique(attribute='node') }}"
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# 3) Seed output map from registry
 - name: Mint | init output map
   set_fact:
     consul_agent_tokens_map: "{{ _token_registry | default({}) }}"
@@ -75,38 +75,31 @@
   delegate_facts: true
   no_log: true
 
-# 4) Mint missing tokens only; reuse those in registry
-- name: Mint | create tokens for missing nodes
-  vars:
-    _gmt: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
-  when: consul_agent_tokens_map.get(item.node, '') | length == 0
-  loop: "{{ _nodes | unique(attribute='node') }}"
-  loop_control:
-    label: "{{ item.node }}"
+# 4) Compute missing nodes (no token yet)
+- name: Mint | compute missing nodes
+  set_fact:
+    _missing_nodes: >-
+      {{
+        _nodes_unique
+        | rejectattr('node','in', consul_agent_tokens_map.keys() | list)
+        | list
+      }}
   run_once: true
   delegate_to: "{{ consul_api_host }}"
-  block:
 
-    - name: Mint | create token ({{ item.node }})
-      command: >
-        podman exec
-        {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
-        {{ consul_server_container }}
-        consul acl token create
-        -description "Agent token for {{ item.node }}"
-        -policy-name {{ item.policy | quote }}
-        -format=json
-        -token {{ _gmt }}
-      register: _t_new
-      changed_when: true
+# 5) Mint for missing nodes only (include per-item)
+- name: Mint | create tokens for missing nodes
+  include_tasks: mint_token_one.yml
+  loop: "{{ _missing_nodes }}"
+  loop_control:
+    label: "{{ item.node }}"
+  vars:
+    node_name: "{{ item.node }}"
+    policy_name: "{{ item.policy }}"
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
 
-    - name: Mint | capture SecretID ({{ item.node }})
-      set_fact:
-        consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ item.node: (_t_new.stdout | from_json).SecretID }) }}"
-      delegate_facts: true
-      no_log: true
-
-# 5) Persist registry (only if changed or not present)
+# 6) Persist registry if changed
 - name: Mint | write updated registry
   copy:
     content: "{{ consul_agent_tokens_map | to_nice_json }}"
@@ -121,3 +114,48 @@
   delegate_to: "{{ consul_api_host }}"
   no_log: true
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+# Expects vars: node_name, policy_name
+# Uses: _cli_env (fact on consul_api_host), consul_mgmt_token_eff_global / hostvars[consul_api_host].consul_mgmt_token_eff
+
+- name: Mint(one) | resolve GMT
+  set_fact:
+    _gmt_eff: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+  no_log: true
+
+- name: Mint(one) | create token for {{ node_name }}
+  command: >
+    podman exec
+    {% for k,v in _cli_env.items() %} -e {{ k }}={{ v }} {% endfor %}
+    {{ consul_server_container }}
+    consul acl token create
+    -description "Agent token for {{ node_name }}"
+    -policy-name {{ policy_name | quote }}
+    -format=json
+    -token {{ _gmt_eff }}
+  register: _t_new
+  changed_when: true
+
+- name: Mint(one) | capture SecretID for {{ node_name }}
+  set_fact:
+    consul_agent_tokens_map: "{{ consul_agent_tokens_map | combine({ node_name: (_t_new.stdout | from_json).SecretID }) }}"
+  delegate_facts: true
+  no_log: true
