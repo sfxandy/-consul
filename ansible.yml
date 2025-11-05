@@ -1,60 +1,80 @@
+
 ---
-# Create/refresh Podman secrets per host (server + agent) without Galaxy modules.
-# Reads token values from the consul_api_host's consul_agent_tokens_map.
+# Build a flat list of secrets to (re)create, then handle each with include_tasks.
 
-- name: Ensure per-host secrets exist (server+agent)
+- name: Init secret items
+  set_fact:
+    _secret_items: []
+  run_once: true
+
+- name: Collect per-host secret items (server + agent)
+  set_fact:
+    _secret_items: "{{ _secret_items + [
+      {
+        'host': item,
+        'node': hostvars[item].consul_server_node_name,
+        'secret_name': 'consul_agent_token_' ~ hostvars[item].consul_server_node_name
+      },
+      {
+        'host': item,
+        'node': hostvars[item].consul_client_node_name,
+        'secret_name': 'consul_agent_token_' ~ hostvars[item].consul_client_node_name
+      }
+    ] }}"
   loop: "{{ groups['consul_hosts'] }}"
+  run_once: true
+
+- name: Ensure Podman secrets exist (server + agent per host)
+  include_tasks: secrets_one.yml
+  loop: "{{ _secret_items }}"
   loop_control:
-    loop_var: tgt
-    label: "{{ tgt }}"
-  delegate_to: "{{ tgt }}"
-  block:
+    label: "{{ item.host }} -> {{ item.secret_name }}"
 
-    - name: Derive node + secret names for {{ tgt }}
-      set_fact:
-        _srv_node: "{{ hostvars[tgt].consul_server_node_name }}"
-        _cli_node: "{{ hostvars[tgt].consul_client_node_name }}"
-        _srv_secret: "consul_agent_token_{{ hostvars[tgt].consul_server_node_name }}"
-        _cli_secret: "consul_agent_token_{{ hostvars[tgt].consul_client_node_name }}"
 
-    # ----- Server secret -----
-    - name: Check if server secret exists ({{ _srv_secret }})
-      command: podman secret inspect {{ _srv_secret }}
-      register: _srv_secret_inspect
-      failed_when: false
-      changed_when: false
 
-    - name: Remove existing server secret ({{ _srv_secret }})
-      command: podman secret rm {{ _srv_secret }}
-      when: _srv_secret_inspect.rc == 0
-      register: _srv_secret_rm
-      changed_when: _srv_secret_rm.rc == 0
 
-    - name: Create server secret ({{ _srv_secret }})
-      shell: podman secret create {{ _srv_secret }} -
-      args:
-        stdin: "{{ hostvars[consul_api_host].consul_agent_tokens_map[_srv_node] }}"
-      no_log: true
-      register: _srv_secret_create
-      changed_when: _srv_secret_create.rc == 0
 
-    # ----- Agent secret -----
-    - name: Check if client secret exists ({{ _cli_secret }})
-      command: podman secret inspect {{ _cli_secret }}
-      register: _cli_secret_inspect
-      failed_when: false
-      changed_when: false
 
-    - name: Remove existing client secret ({{ _cli_secret }})
-      command: podman secret rm {{ _cli_secret }}
-      when: _cli_secret_inspect.rc == 0
-      register: _cli_secret_rm
-      changed_when: _cli_secret_rm.rc == 0
 
-    - name: Create client secret ({{ _cli_secret }})
-      shell: podman secret create {{ _cli_secret }} -
-      args:
-        stdin: "{{ hostvars[consul_api_host].consul_agent_tokens_map[_cli_node] }}"
-      no_log: true
-      register: _cli_secret_create
-      changed_when: _cli_secret_create.rc == 0
+
+
+
+
+---
+# Expects item = { host, node, secret_name }
+# Reads token value from consul_api_host's consul_agent_tokens_map[item.node]
+
+- name: Lookup token value for {{ item.node }}
+  set_fact:
+    _secret_value: "{{ hostvars[consul_api_host].consul_agent_tokens_map[item.node] | default('') }}"
+  no_log: true
+  run_once: true
+
+- name: Assert token value present for {{ item.node }}
+  assert:
+    that: _secret_value | length > 0
+    fail_msg: "No token found for node {{ item.node }} in consul_agent_tokens_map on {{ consul_api_host }}."
+  run_once: true
+
+- name: Check if secret exists ({{ item.secret_name }})
+  command: podman secret inspect {{ item.secret_name }}
+  register: _inspect
+  failed_when: false
+  changed_when: false
+  delegate_to: "{{ item.host }}"
+
+- name: Remove existing secret ({{ item.secret_name }})
+  command: podman secret rm {{ item.secret_name }}
+  when: _inspect.rc == 0
+  register: _rm
+  changed_when: _rm.rc == 0
+  delegate_to: "{{ item.host }}"
+
+- name: Create secret ({{ item.secret_name }}) from stdin
+  shell: podman secret create {{ item.secret_name }} -
+  args:
+    stdin: "{{ _secret_value }}"
+  no_log: true
+  register: _create
+  changed_when: _create.rc == 0
+  delegate_to: "{{ item.host }}"
