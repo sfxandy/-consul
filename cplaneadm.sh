@@ -1,34 +1,53 @@
 #!/usr/bin/env bash
+# cplaneadm — helper for podman-compose “control plane” stacks
+# - Reads defaults from ~/.env/cplaneadm.env (overrides below)
+# - Supports base + secure overlays
+# - Manage server | agent | both
+# - Safe path expansion, pretty status, no early exits
+
 set -Eeuo pipefail
 
+# ---------- Defaults (overridable via env file) ----------
 : "${CPLANEADM_ENV:=${HOME}/.env/cplaneadm.env}"
 : "${COMPOSE_BASE:=docker-compose.yml}"
-: "${COMPOSE_SECURE:=docker-compose.secure.yml}"
+: "${COMPOSE_SECURE:=docker-compose.secure.yml}"     # optional overlay
 : "${COMPOSE_DIR:=${PWD}}"
-: "${COMPOSE_PROFILES:=}"
+: "${COMPOSE_PROFILES:=}"                             # e.g. "bootstrap,secure"
 : "${SERVER_SVC:=consul-server}"
 : "${AGENT_SVC:=consul-agent}"
 : "${SERVER_CONT:=consul-server}"
 : "${AGENT_CONT:=consul-agent}"
-: "${SECURE_REQUIRED:=false}"
+: "${SECURE_REQUIRED:=false}"                         # if true, fail if overlay missing
 : "${NO_COLOR:=false}"
 
-if [[ "${NO_COLOR}" == "true" ]]; then RED="" GREEN="" YELLOW="" DIM="" BOLD="" NC=""
-else RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; DIM=$'\033[2m'; BOLD=$'\033[1m'; NC=$'\033[0m'; fi
+# ---------- UI ----------
+if [[ "${NO_COLOR}" == "true" ]]; then
+  RED="" GREEN="" YELLOW="" DIM="" BOLD="" NC=""
+else
+  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
+  DIM=$'\033[2m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+fi
 die(){ echo -e "${RED}error:${NC} $*" >&2; exit 1; }
 note(){ echo -e "${DIM}$*${NC}"; }
 ok(){ echo -e "${GREEN}$*${NC}"; }
 
+# ---------- Helpers ----------
 expand_path(){ local p="$1"; [[ "$p" == "~" || "$p" == ~/* ]] && p="${p/#\~/$HOME}"; realpath -m -- "$p"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
-
-pcmd(){ local -a fargs=(); [[ -n "${_COMPOSE_BASE:-}" ]] && fargs+=(-f "${_COMPOSE_BASE}"); [[ -n "${_COMPOSE_SECURE:-}" ]] && fargs+=(-f "${_COMPOSE_SECURE}"); ( cd "${COMPOSE_DIR}" && COMPOSE_PROFILES="${COMPOSE_PROFILES}" podman-compose "${fargs[@]}" "$@" ); }
+pcmd(){ # run podman-compose with -f args, cd into COMPOSE_DIR
+  local -a fargs=()
+  [[ -n "${_COMPOSE_BASE:-}" ]]   && fargs+=(-f "${_COMPOSE_BASE}")
+  [[ -n "${_COMPOSE_SECURE:-}" ]] && fargs+=(-f "${_COMPOSE_SECURE}")
+  ( cd "${COMPOSE_DIR}" && COMPOSE_PROFILES="${COMPOSE_PROFILES}" podman-compose "${fargs[@]}" "$@" )
+}
 pexec(){ podman exec "$@"; }
-curl_in(){ local cont="$1"; shift; pexec "${cont}" sh -lc "curl -fsS $*"; }
+curl_in(){ local c="$1"; shift; pexec "$c" sh -lc "curl -fsS $*"; }
 
+# ---------- Env loader (no early exit) ----------
 load_envfile(){
   local f; f="$(expand_path "${CPLANEADM_ENV}")"
   if [[ -f "$f" ]]; then
+    # shellcheck disable=SC2163
     while IFS= read -r line; do
       [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
       if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
@@ -37,21 +56,25 @@ load_envfile(){
     done <"$f"
     ok "loaded env: $f"
   else
-    note "no env file at ${f} (proceeding with defaults)"
+    note "no env file at ${f} (defaults in use)"
   fi
 }
 
+# ---------- Compose resolution ----------
 resolve_compose(){
   COMPOSE_DIR="$(expand_path "${COMPOSE_DIR}")"
   _COMPOSE_BASE="$(expand_path "${COMPOSE_DIR}/${COMPOSE_BASE}")"
   _COMPOSE_SECURE=""
   [[ -f "${COMPOSE_DIR}/${COMPOSE_SECURE}" ]] && _COMPOSE_SECURE="$(expand_path "${COMPOSE_DIR}/${COMPOSE_SECURE}")"
   [[ -f "${_COMPOSE_BASE}" ]] || die "base compose not found: ${_COMPOSE_BASE}"
-  if [[ -n "${_COMPOSE_SECURE}" ]]; then note "secure overlay detected: ${_COMPOSE_SECURE}"
-  else [[ "${SECURE_REQUIRED}" == "true" ]] && die "secure overlay required but not found: ${COMPOSE_DIR}/${COMPOSE_SECURE}" || note "no secure overlay present"; fi
+  if [[ -n "${_COMPOSE_SECURE}" ]]; then
+    note "secure overlay detected: ${_COMPOSE_SECURE}"
+  else
+    [[ "${SECURE_REQUIRED}" == "true" ]] && die "secure overlay required but not found: ${COMPOSE_DIR}/${COMPOSE_SECURE}" || note "no secure overlay present (ok for initial bring-up)"
+  fi
 }
 
-# --- target resolution: server|agent|both (default both) ---
+# ---------- Targets: server|agent|both ----------
 resolve_targets(){
   local t="${1:-both}"
   case "$t" in
@@ -62,9 +85,10 @@ resolve_targets(){
   esac
 }
 
+# ---------- Commands ----------
 usage(){
   cat <<EOF
-${BOLD}cplaneadm${NC} — control-plane wrapper for podman-compose
+${BOLD}cplaneadm${NC} — podman-compose wrapper
 
 Usage:
   cplaneadm up [server|agent|both] [--base-only]
@@ -80,14 +104,18 @@ EOF
 }
 
 cmd_env(){
-  echo "CPLANEADM_ENV=${CPLANEADM_ENV}"
-  echo "COMPOSE_DIR=${COMPOSE_DIR}"
-  echo "COMPOSE_BASE=${COMPOSE_BASE}"
-  echo "COMPOSE_SECURE=${COMPOSE_SECURE}"
-  echo "COMPOSE_PROFILES=${COMPOSE_PROFILES}"
-  echo "SECURE_REQUIRED=${SECURE_REQUIRED}"
-  echo "_COMPOSE_BASE=${_COMPOSE_BASE}"
-  echo "_COMPOSE_SECURE=${_COMPOSE_SECURE}"
+  cat <<EOF
+CPLANEADM_ENV=${CPLANEADM_ENV}
+COMPOSE_DIR=${COMPOSE_DIR}
+COMPOSE_BASE=${COMPOSE_BASE}
+COMPOSE_SECURE=${COMPOSE_SECURE}
+COMPOSE_PROFILES=${COMPOSE_PROFILES}
+SECURE_REQUIRED=${SECURE_REQUIRED}
+_COMPOSE_BASE=${_COMPOSE_BASE}
+_COMPOSE_SECURE=${_COMPOSE_SECURE}
+SERVER_SVC=${SERVER_SVC}  AGENT_SVC=${AGENT_SVC}
+SERVER_CONT=${SERVER_CONT}  AGENT_CONT=${AGENT_CONT}
+EOF
 }
 
 cmd_up(){
@@ -95,10 +123,10 @@ cmd_up(){
   local base_only="false"; [[ "${1:-}" == "--base-only" ]] && base_only="true"
   resolve_targets "$target"
   if [[ "$base_only" == "true" || -z "${_COMPOSE_SECURE}" ]]; then
-    ok "bringing up (base only) → ${TARGET_SERVICES[*]}"
+    ok "up (base only) → ${TARGET_SERVICES[*]}"
     pcmd up -d "${TARGET_SERVICES[@]}"
   else
-    ok "bringing up (base + secure) → ${TARGET_SERVICES[*]}"
+    ok "up (base + secure) → ${TARGET_SERVICES[*]}"
     pcmd up -d "${TARGET_SERVICES[@]}"
   fi
 }
@@ -152,9 +180,14 @@ cmd_status(){
   note "profiles: ${COMPOSE_PROFILES:-<none>} | compose: ${_COMPOSE_BASE}${_COMPOSE_SECURE:+ + ${_COMPOSE_SECURE}}"
 }
 
+# ---------- Main ----------
 main(){
-  have podman-compose || die "podman-compose not found"; have podman || die "podman not found"
-  load_envfile; resolve_compose
+  have podman-compose || die "podman-compose not found in PATH"
+  have podman || die "podman not found in PATH"
+
+  load_envfile
+  resolve_compose
+
   local cmd="${1:-}"; shift || true
   case "$cmd" in
     up)        cmd_up "$@";;
