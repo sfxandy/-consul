@@ -1,23 +1,16 @@
-version: "3.8"
+---
+# Persist the agent token values from Podman secrets into Consul agents
 
-# Per-host external secrets (created by tasks/secrets.yml)
-secrets:
-  consul_agent_token_server_node:
-    external: true
-    name: {{ (consul_secret_prefix | default('consul_agent_token_')) ~ consul_server_node_name }}
-  consul_agent_token_client_node:
-    external: true
-    name: {{ (consul_secret_prefix | default('consul_agent_token_')) ~ consul_client_node_name }}
+- name: Persist agent token in SERVER
+  command: >
+    podman exec {{ consul_server_container }} sh -lc
+    'consul acl set-agent-token agent  "$(cat /run/secrets/{{ podman_secret_target_server }})" &&
+     consul acl set-agent-token default "$(cat /run/secrets/{{ podman_secret_target_server }})"'
+  changed_when: true
 
-services:
-  consul-server:
-    secrets:
-      - source: consul_agent_token_server_node
-        target: {{ podman_secret_target_server }}
-        mode: 0440
-
-  consul-agent:
-    secrets:
-      - source: consul_agent_token_client_node
-        target: {{ podman_secret_target_client }}
-        mode: 0440
+- name: Persist agent token in CLIENT
+  command: >
+    podman exec {{ consul_client_container }} sh -lc
+    'consul acl set-agent-token agent  "$(cat /run/secrets/{{ podman_secret_target_client }})" &&
+     consul acl set-agent-token default "$(cat /run/secrets/{{ podman_secret_target_client }})"'
+  changed_when: true
