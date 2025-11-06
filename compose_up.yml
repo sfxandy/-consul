@@ -1,0 +1,59 @@
+---
+# roles/consul_podman_acl_v3/tasks/compose_up.yml
+# Use the cplaneadm helper to (re)start the stack.
+# Gate secure overlay by checking Podman secrets first to avoid compose errors.
+
+- name: Compose | ensure cplaneadm exists
+  command: which cplaneadm
+  register: _cplaneadm_which
+  changed_when: false
+
+- name: Compose | compute per-host secret names
+  set_fact:
+    _srv_secret: "consul_agent_token_{{ consul_server_node_name }}"
+    _cli_secret: "consul_agent_token_{{ consul_client_node_name }}"
+
+- name: Compose | inspect server secret
+  command: podman secret inspect {{ _srv_secret }}
+  register: _srv_secret_inspect
+  failed_when: false
+  changed_when: false
+
+- name: Compose | inspect client secret
+  command: podman secret inspect {{ _cli_secret }}
+  register: _cli_secret_inspect
+  failed_when: false
+  changed_when: false
+
+- name: Compose | decide if secure overlay can be used
+  set_fact:
+    _secure_ready: "{{ (_srv_secret_inspect.rc == 0) and (_cli_secret_inspect.rc == 0) }}"
+
+# Bring up via cplaneadm (secure overlay only if both secrets exist)
+- name: Compose | up (base + secure via cplaneadm)
+  command: >
+    cplaneadm up
+  environment:
+    CPLANEADM_ENV: "{{ consul_cplaneadm_env_path | default(ansible_env.HOME ~ '/.env/cplaneadm.env') }}"
+  when: _secure_ready
+  register: _up_secure
+  changed_when: _up_secure.rc == 0
+
+- name: Compose | up (base only via cplaneadm)
+  command: >
+    cplaneadm up --base-only
+  environment:
+    CPLANEADM_ENV: "{{ consul_cplaneadm_env_path | default(ansible_env.HOME ~ '/.env/cplaneadm.env') }}"
+  when: not _secure_ready
+  register: _up_base
+  changed_when: _up_base.rc == 0
+
+# Optional: show status (non-fatal)
+- name: Compose | status
+  command: >
+    cplaneadm status
+  environment:
+    CPLANEADM_ENV: "{{ consul_cplaneadm_env_path | default(ansible_env.HOME ~ '/.env/cplaneadm.env') }}"
+  register: _status
+  failed_when: false
+  changed_when: false
