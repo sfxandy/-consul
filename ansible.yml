@@ -1,17 +1,56 @@
-# After the slurp step
+---
+# ---- PREAMBLE: hydrate consul_agent_tokens_map on consul_api_host, slurp only if missing ----
 
-- name: Mint | parse registry json (when present)
-  when: _reg_stat.stat.exists | default(false)
+# 0) Do we already have the host fact?
+- name: Secrets | detect existing token map fact
   set_fact:
-    _token_registry: "{{ _reg_slurp.content | b64decode | from_json }}"
-  delegate_to: "{{ consul_api_host }}"
-  no_log: true
+    _have_fact: >-
+      {{
+        (hostvars[consul_api_host].consul_agent_tokens_map is defined)
+        and ((hostvars[consul_api_host].consul_agent_tokens_map | length) > 0)
+      }}
   run_once: true
 
-- name: Mint | init empty registry (when absent)
-  when: not (_reg_stat.stat.exists | default(false))
-  set_fact:
-    _token_registry: {}
+# 1) If missing, check for registry on consul_api_host
+- name: Secrets | check token registry file
+  when: not _have_fact
+  stat:
+    path: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
+  register: _tokreg_stat
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+
+# 2) If missing fact AND registry exists, slurp it
+- name: Secrets | slurp token registry
+  when:
+    - not _have_fact
+    - _tokreg_stat.stat.exists | default(false)
+  slurp:
+    path: "{{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}"
+  register: _tokreg_slurp
+  run_once: true
   delegate_to: "{{ consul_api_host }}"
   no_log: true
+
+# 3) Publish the fact from registry (only when we had to slurp)
+- name: Secrets | publish consul_agent_tokens_map from registry
+  when:
+    - not _have_fact
+    - _tokreg_stat.stat.exists | default(false)
+  set_fact:
+    consul_agent_tokens_map: "{{ _tokreg_slurp.content | b64decode | from_json }}"
+  run_once: true
+  delegate_to: "{{ consul_api_host }}"
+  delegate_facts: true
+  no_log: true
+
+# 4) Fail fast if we still don’t have the map
+- name: Secrets | assert token map present
+  assert:
+    that:
+      - (hostvars[consul_api_host].consul_agent_tokens_map | default({})) | length > 0
+    fail_msg: >-
+      consul_agent_tokens_map not found on {{ consul_api_host }},
+      and no registry at {{ consul_token_registry_path | default('/root/consul-agent-tokens.json') }}.
+      Run --tags mint_tokens first.
   run_once: true
