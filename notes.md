@@ -1,3 +1,57 @@
+Idempotence by design: Every task can be re-run safely; derived values are persisted (registry pattern) so partial/tagged runs don’t recreate or drift state.
+
+
+Single-responsibility task files: Workflow is decomposed into small, named includes (bootstrap, policies, secrets, start, verify) that map to real operator actions and are easy to test in isolation.
+
+
+Deterministic delegation model: Use of run_once + delegate_to for global ops and per-host delegation for node ops prevents N× duplication and race conditions.
+
+
+Secure secret hygiene: Secrets never hit logs (no_log), are provided to tools via environment variables/runtime mounts, and are validated before use.
+
+
+Environment portability: Behaviour is driven by inventory/defaults and env vars (not conditionals spread through tasks), so the same role runs unchanged across dev/UAT/prod.
+
+
+Minimal coupling to artefacts: Large configs live outside the role; the role renders only small, host/env overlays—keeping things DRY and enabling manual ops when needed.
+
+
+Robust readiness checks: Prefers machine interfaces (HTTP/JSON, invariant text) over brittle CLI parsing; all probes are retryable with clear success predicates.
+
+
+Fail-fast guards: Early assert checks with actionable messages catch misconfigurations before expensive or disruptive steps.
+
+
+Explicit error handling & visibility: Registers results, narrows failed_when/changed_when, and surfaces only what matters—clean, predictable diffs and logs.
+
+
+No exotic dependencies: Sticks to core modules and ubiquitous CLIs, reducing platform friction and easing adoption/maintenance.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 a) Why this is a best-practice, reference role
 
 Deterministic & idempotent: Token minting persists a registry on consul_api_host, enabling safe re-runs and tag-scoped execution without duplication.
