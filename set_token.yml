@@ -1,0 +1,74 @@
+---
+# roles/consul_podman_acl_v3/tasks/set_tokens.yml
+# Use GMT to authorize `consul acl set-agent-token` inside the containers.
+# Also supports HTTPS via CONSUL_HTTP_ADDR / CACERT if enabled.
+
+- name: SetTokens | compute GMT and secret file paths
+  set_fact:
+    _gmt_eff: "{{ hostvars[consul_api_host].consul_mgmt_token_eff | default(consul_mgmt_token_eff_global) }}"
+    _srv_secret_file: "/run/secrets/{{ (consul_secret_prefix | default('consul_agent_token_')) ~ consul_server_node_name }}"
+    _cli_secret_file: "/run/secrets/{{ (consul_secret_prefix | default('consul_agent_token_')) ~ consul_client_node_name }}"
+    _http_addr: >-
+      {{
+        consul_api_use_https
+          | ternary('https://127.0.0.1:' ~ (consul_https_port|string), 'http://127.0.0.1:8500')
+      }}
+    _curl_tls_env: >-
+      {{
+        consul_api_use_https
+          | ternary(
+              {
+                'CONSUL_CACERT': consul_tls_ca_path,
+                'CONSUL_CLIENT_CERT': consul_tls_client_cert,
+                'CONSUL_CLIENT_KEY': consul_tls_client_key
+              },
+              {}
+            )
+      }}
+  no_log: true
+
+- name: SetTokens | assert GMT available
+  assert:
+    that: _gmt_eff is defined and (_gmt_eff | length) > 0
+    fail_msg: "Global Management Token not available. Run bootstrap or provide CONSUL_HTTP_TOKEN/dev dump."
+
+# Ensure secret files are mounted
+- name: SetTokens | ensure server token file is mounted
+  command: podman exec {{ consul_server_container }} test -s {{ _srv_secret_file }}
+
+- name: SetTokens | ensure client token file is mounted
+  command: podman exec {{ consul_client_container }} test -s {{ _cli_secret_file }}
+
+# SERVER: set agent/default tokens (authorized by GMT)
+- name: SetTokens | persist token in SERVER
+  command: >
+    podman exec
+    -e CONSUL_HTTP_TOKEN={{ _gmt_eff }}
+    -e CONSUL_HTTP_ADDR={{ _http_addr }}
+    {% if consul_api_use_https %}
+    -e CONSUL_CACERT={{ _curl_tls_env.CONSUL_CACERT }}
+    {% if _curl_tls_env.CONSUL_CLIENT_CERT is defined %}-e CONSUL_CLIENT_CERT={{ _curl_tls_env.CONSUL_CLIENT_CERT }}{% endif %}
+    {% if _curl_tls_env.CONSUL_CLIENT_KEY  is defined %}-e CONSUL_CLIENT_KEY={{ _curl_tls_env.CONSUL_CLIENT_KEY  }}{% endif %}
+    {% endif %}
+    {{ consul_server_container }} sh -lc
+    'consul acl set-agent-token agent  "$(cat {{ _srv_secret_file }})" &&
+     consul acl set-agent-token default "$(cat {{ _srv_secret_file }})"'
+  changed_when: true
+  no_log: true
+
+# CLIENT: set agent/default tokens (authorized by GMT)
+- name: SetTokens | persist token in CLIENT
+  command: >
+    podman exec
+    -e CONSUL_HTTP_TOKEN={{ _gmt_eff }}
+    -e CONSUL_HTTP_ADDR={{ _http_addr }}
+    {% if consul_api_use_https %}
+    -e CONSUL_CACERT={{ _curl_tls_env.CONSUL_CACERT }}
+    {% if _curl_tls_env.CONSUL_CLIENT_CERT is defined %}-e CONSUL_CLIENT_CERT={{ _curl_tls_env.CONSUL_CLIENT_CERT }}{% endif %}
+    {% if _curl_tls_env.CONSUL_CLIENT_KEY  is defined %}-e CONSUL_CLIENT_KEY={{ _curl_tls_env.CONSUL_CLIENT_KEY  }}{% endif %}
+    {% endif %}
+    {{ consul_client_container }} sh -lc
+    'consul acl set-agent-token agent  "$(cat {{ _cli_secret_file }})" &&
+     consul acl set-agent-token default "$(cat {{ _cli_secret_file }})"'
+  changed_when: true
+  no_log: true
