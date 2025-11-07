@@ -1,3 +1,43 @@
+a) Why this is a best-practice, reference role
+
+Deterministic & idempotent: Token minting persists a registry on consul_api_host, enabling safe re-runs and tag-scoped execution without duplication.
+
+Separation of concerns: Compose lives outside the role; the role renders only minimal, DRY HCL overlays (server/agent/ACL) and validates paths.
+
+Podman-correct secrets: Secure overlay follows Podman-Compose rules (no target:/name: remaps); secret name == mounted filename under /run/secrets.
+
+Safe bootstrap gating: Tokenless leader wait via /v1/status/leader; ACL state detected via GET /v1/acl/bootstrap (404 vs 405/403) before actions.
+
+Principled auth: GMT discovered from multiple sources, stored as a host fact, injected via CONSUL_HTTP_TOKEN; sensitive data always no_log.
+
+Right-sized delegation: run_once + delegate_to only for global ops; per-item includes delegate internally (no loop-on-block traps).
+
+Environment portability: HTTP/TLS toggles via env to consul CLI; works identically in dev/UAT/prod.
+
+Operator ergonomics: Clear tags (bootstrap, policies, mint_tokens, secrets, compose_up, set_tokens, verify) map to BAU workflows.
+
+Minimal dependencies: Core Ansible + CLI; no Galaxy collections required.
+
+Tooling integration: cplaneadm wrapper standardizes up/down/restart/status and respects secure overlay readiness.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Generalisable patterns & techniques this role demonstrates
 
 Idempotent “registry” pattern: Persist computed artefacts (e.g., tokens/IDs) to a small JSON/YAML file on a well-known host, then hydrate facts from it on future runs. Enables safe partial runs (--tags) without recomputing.
