@@ -1,0 +1,78 @@
+{
+  "partition": "default",
+  "namespace": "default",
+  "routing": {
+    "host": "upstream.bank.internal",
+    "port": 443,
+    "tls": {
+      "verify_peer": true,
+      "sni": "upstream.bank.internal",
+      "client_cert_ref": "secrets://kv/tls/payments/mtls/cert.pem",
+      "client_key_ref":  "secrets://kv/tls/payments/mtls/key.pem",
+      "ca_bundle_ref":   "secrets://kv/tls/payments/mtls/ca.pem",
+      "alpn": ["h2", "http/1.1"],
+      "min_version": "TLS1.2"
+    }
+  },
+  "connect": { "protocol": "http", "timeouts": { "request": "5s", "idle": "60s" } },
+  "router": { "prefix": "/v1/", "retries": { "attempts": 2, "per_try_timeout": "1s" } }
+}
+
+
+
+
+
+
+
+{
+  "partition":"default","namespace":"default",
+  "routing":{"host":"api.internal.example","port":8080},
+  "connect":{"protocol":"http"}
+}
+
+
+
+
+
+
+
+
+{
+  "partition":"default","namespace":"default",
+  "routing":{"host":"10.20.30.40","port":1521},
+  "connect":{"protocol":"tcp"}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+curl -X PUT :8080/services/dev.credit.open-build \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "partition":"default","namespace":"default",
+    "routing":{"host":"ggdgsswpo350.foodc.emea.bank.com","port":49519,
+      "tls":{"sni":"dev.credit.foo.bar","verify_peer":true}},
+    "connect":{"protocol":"http","timeouts":{"request":"5s","idle":"60s"}},
+    "router":{"prefix":"/v1/","retries":{"attempts":2,"per_try_timeout":"1s"}}
+  }'
+
+
+
+
+
+
+
+
+
+
+
+
+
