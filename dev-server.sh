@@ -202,4 +202,24 @@ Consul dev server is up with HTTP exposed:
 • Sidecars:      ${SIDECAR_MIN_PORT}-${SIDECAR_MAX_PORT}
 
 Paths:
-• Config dir:
+• Config dir:  ${CONF_DIR}
+• Data dir:    ${DATA_DIR}
+• Log file:    ${LOG_DIR}/consul.log
+• PID file:    ${PID_FILE}
+
+ACL:
+• Management token: ${MGMT_TOKEN_FILE}
+• RO token (if created):    ${TOKENS_DIR}/${RO_POLICY_NAME}.token
+• Admin token (if created): ${TOKENS_DIR}/${ADMIN_POLICY_NAME}.token
+
+Exports for convenience:
+  export CONSUL_HTTP_ADDR="http://127.0.0.1:${PORT_HTTP}"
+  export CONSUL_HTTP_TOKEN="\$(cat "${MGMT_TOKEN_FILE}")"
+
+Stop:
+  kill \$(cat "${PID_FILE}")  # or: pkill -f 'consul agent -config-dir'
+
+Security tips:
+- HTTP is open on 0.0.0.0 with ACL default_policy=deny. Hand out only RO/Admin tokens.
+- Consider OS firewall rules to restrict ${PORT_HTTP} to your VPN or office CIDRs.
+EOS
