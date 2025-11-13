@@ -1,0 +1,55 @@
+%% svc-handler v2.1 PUT sequence (Mermaid)
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API Server
+    participant KV as Consul KV
+    participant S as Consul Sessions
+    participant CE as Consul Config Entries
+
+    C->>A: PUT /services/{name} + JSON
+    A->>A: Validate payload & name
+    alt Invalid payload/name
+        A-->>C: 422 Unprocessable Entity
+    else Valid
+        A->>KV: Put desired JSON (svc-handler/desired/part/ns/name)
+        alt KV write fails
+            A-->>C: 502 Bad Gateway (step="kv.put")
+        else KV ok
+            A->>S: Create session (TTL=LOCK_TTL)
+            A->>KV: Acquire lock (svc-handler/locks/part/ns/name, session)
+            alt Lock held by another worker
+                A-->>C: 409 Conflict (operation in progress)
+                A->>S: Destroy session
+            else Lock acquired
+                A->>CE: Set ServiceDefaults(name, protocol)
+                alt Defaults upsert fails
+                    A-->>C: 502 (apply, step="service-defaults")
+                else Defaults ok
+                    A->>CE: Upsert TerminatingGateway(tgwService, link=name, meta=routing/*)
+                    alt TGW upsert fails
+                        A-->>C: 502 (apply, step="terminating-gateway")
+                    else TGW ok
+                        opt Router provided
+                            A->>CE: Set ServiceRouter(name, prefix,retries)
+                            alt Router upsert fails
+                                A-->>C: 502 (apply, step="service-router")
+                            end
+                        end
+                        A->>CE: Get ServiceDefaults(name) (RequireConsistent)
+                        A->>CE: Get TerminatingGateway(tgwService) (RequireConsistent)
+                        opt Router provided
+                            A->>CE: Get ServiceRouter(name) (RequireConsistent)
+                        end
+                        alt Verify fails
+                            A-->>C: 502 (verify)
+                        else Verified
+                            A->>KV: Release lock
+                            A->>S: Destroy session
+                            A-->>C: 200 OK {"status":"applied","observed":{...}}
+                        end
+                    end
+                end
+            end
+        end
+    end
