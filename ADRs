@@ -1,0 +1,60 @@
+# Architecture Decision Records
+
+This document captures a set of Architecture Decision Records (ADRs) for the service registration control plane.
+
+---
+
+## ADR-001: Expose the Control Plane as a REST HTTP API
+
+**Status**  
+Proposed / Accepted
+
+**Date**  
+YYYY-MM-DD
+
+### Context
+We are building a service registration control plane that is responsible for registering, updating, and deregistering services in Consul. This control plane will be used by many different clients: CI/CD pipelines, automation scripts, backend services, and potentially operators during incident response.
+
+We need a communication style that is:
+
+- Easy to integrate with from many environments.
+- Compatible with existing infrastructure (gateways, WAFs, monitoring).
+- Easy to debug and operate.
+
+### Decision
+Expose the control plane as a **REST-style HTTP API**, using standard HTTP verbs and JSON payloads.
+
+- Use HTTP(S) as the transport.
+- Use JSON as the primary request/response format.
+- Design resource-oriented endpoints, for example:
+  - `POST /services`
+  - `GET /services/{serviceId}`
+  - `PUT` / `PATCH /services/{serviceId}`
+  - `DELETE /services/{serviceId}`
+
+### Consequences
+
+**Positive**
+
+- Any client that can make HTTP calls (curl, Python, Node, Java, CI runners) can integrate without special SDKs.
+- Fits naturally behind existing API gateways, WAFs, and load balancers.
+- Leverages standard HTTP semantics (status codes, headers, caching where applicable).
+- Easy to inspect and debug via common tools (curl, Postman, browser).
+
+**Negative**
+
+- HTTP+JSON has more overhead than some binary RPC protocols (e.g. gRPC).
+- REST conventions require some discipline and design effort to keep the API consistent.
+
+---
+
+## ADR-002: Model Services and Instances as First-Class Resources
+
+**Status**  
+Proposed / Accepted
+
+**Date**  
+YYYY-MM-DD
+
+### Context
+Consul exposes its own service and health check primitives. However, our consumers don’t necessarily need or want to deal directly with Consul’s internal da
