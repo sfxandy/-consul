@@ -1,0 +1,166 @@
+Love this direction. You’re basically defining a desired-state API with a least-privilege reconciler that materializes a logical service as several Consul resources (catalog + config entries + TGW wiring). That’s the right mental model because Consul itself doesn’t give you that composite “service object.”
+
+Here’s how I’d shape it so it’s robust, idempotent, and zero-trust.
+
+Architecture (TL;DR)
+
+REST API accepts desired state → validates → writes one canonical record to storage (with its own accessor_id, version, and idempotency key).
+
+Reconciler worker (same process or separate) reads desired state → applies to Consul using short-lived, least-privilege ACLs → verifies with consistent reads → updates storage with Consul metadata (resource IDs/ModifyIndex/hash).
+
+Two “external-service” strategies, selectable per spec:
+
+Static-cluster via Terminating Gateway (no catalog registration for the external target).
+
+Catalog registration for the external service (dynamic cluster).
+You already track both as “alias pattern A/B”—support both behind a driver interface.
+
+Deletes/Updates become deterministic: change desired state, let reconciliation converge; on delete mark state=deleting, run compensations, then tombstone.
+
+API surface (clean & idempotent)
+
+PUT /services/{name} → create or replace (idempotent). Client may send Idempotency-Key header; you also enforce (partition, namespace, name) uniqueness server-side.
+
+PATCH /services/{name} → partial update (merge).
+
+GET /services/{name} → returns desired + observed (Consul resource refs + drift status).
+
+DELETE /services/{name} → marks for deletion; reconciler tears down safely.
+
+GET /services?label=x → list/search.
+
+Example request (external via TGW static-cluster)
+{
+  "name": "dev.credit.open-build",
+  "partition": "default",
+  "namespace": "default",
+  "routing": {
+    "host": "ggdgsswpo350.foodc.emea.bank.com",
+    "port": 49519,
+    "tls": { "sni": "dev.credit.foo.bar", "verify_peer": true }
+  },
+  "exposure": {
+    "mode": "tgw_static",      // or "catalog_external"
+    "terminating_gateway": {
+      "service": "tgw-west-1", // which TGW instances to program/target set
+      "dc": "west-1"
+    }
+  },
+  "connect": {
+    "mesh_policy": {
+      "protocol": "http",
+      "timeouts": { "request": "5s", "idle": "60s" }
+    },
+    "router": {
+      "prefix": "/v1/",
+      "retries": { "attempts": 2, "per_try_timeout": "1s" }
+    }
+  },
+  "metadata": {
+    "owner": "payments-platform",
+    "pii": false,
+    "cost_center": "FIN-1234"
+  }
+}
+
+Example response
+{
+  "accessor_id": "svc_01HZX4Z8G7M7F0R9M7K0W9E64C",
+  "desired_version": 3,
+  "apply_status": "in_progress",
+  "consul_refs": null
+}
+
+Storage model (authoritative)
+
+Tables (or collections) you need:
+
+services — desired spec JSON (immutable per version), current version, state (active|deleting|error), accessor_id, idempotency keys, audit columns.
+
+service_components — one row per logical component with last applied hash and Consul ModifyIndex/resource IDs:
+
+service-defaults
+
+service-router
+
+(optional) service-splitter, service-resolver
+
+terminating-gateway binding (A) or catalog-service (B)
+
+outbox — append-only events for audit and replay.
+
+runs — reconciliation run results, timings, diffs, failure stage.
+
+Persistence choices: start with Postgres (transactions, JSONB, FOR UPDATE SKIP LOCKED for worker leasing, nice). SQLite works for single-node MVP but Postgres is worth it.
+
+Reconciliation algorithm (deterministic & safe)
+
+Load desired spec by accessor_id (or {name,ns,partition}), acquire a work lease (advisory lock or SKIP LOCKED).
+
+Render concrete Consul resources from spec:
+
+ServiceDefaults (protocol/timeouts/tags/Meta)
+
+ServiceRouter (HTTP routes, retries)
+
+If A (tgw_static):
+
+Program TGW (proxy-defaults or TGW config entry depending on your org pattern) with a static cluster for name → (host:port, TLS options)
+
+If B (catalog_external):
+
+Register catalog.Service (external) in desired DC with Address, Port, Meta, Checks (optionally health TTL + your own heartbeat)
+
+Apply entries in order (idempotent upserts). Capture ModifyIndex/Raft indices and compute a content hash per resource.
+
+Verify with consistent reads; compare round-tripped structs vs your rendered hash (prevents stale leader reads).
+
+Compensate on failure:
+
+If a late step fails, roll back created pieces OR leave partial and re-run to converge (my preference: treat the world as convergent; only delete if the entire desired is being removed).
+
+Update service_components with Consul IDs, ModifyIndex, hash, observed timestamp. Update services.current_version and apply_status.
+
+Key property: all operations are idempotent. Your hash allows you to skip writes if unchanged.
+
+Zero-trust & ACLs (practical, least-privilege)
+
+Never run with a global management token in the API web process.
+
+Use a short-lived “writer” token minted by a broker (Vault or a tiny in-house minting service with Consul ACL bootstrap token sealed away). The web/API receives no Consul ACLs; only the reconciler fetches short-lived tokens.
+
+Separate policies for each surface you touch:
+
+Config Entries (namespaced):
+
+# allow config entry ops for this service name only
+config_entry {
+  kind = "service-defaults"
+  name = "dev.credit.open-build"
+  policy = "write"
+}
+config_entry {
+  kind = "service-router"
+  name = "dev.credit.open-build"
+  policy = "write"
+}
+# if you use terminating-gateway or proxy-defaults per TGW service name:
+config_entry {
+  kind = "terminating-gateway"
+  name = "tgw-west-1"
+  policy = "write"
+}
+
+
+Catalog (only if using pattern B):
+
+service "dev.credit.open-build" {
+  policy = "write"
+}
+node_prefix "" { policy = "read" } # minimally to resolve writes; tighten if needed
+
+
+Read-only scopes to verify (config_entry:read, service:read), optionally Intentions write if you manage them.
+
+Tokens expire fast (e.g., 5–10 min), reconciler refreshes as needed.
+
