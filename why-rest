@@ -1,0 +1,9 @@
+Easy integration from anywhere – any CI/CD pipeline, script, or app that can make HTTP calls (curl, Python, Jenkins, GitHub Actions, etc.) can register services without special libraries or clients.
+
+Aligns with Consul’s own HTTP model – service, instance, and health-check concepts map cleanly to REST resources and verbs, making it easier to reason about and to translate requests into Consul API calls.
+
+Security and governance are straightforward – you can put the REST API behind existing API gateways, WAFs, and mTLS/OAuth/JWT setups that all assume HTTP, so platform/security teams can manage it with familiar tools.
+
+Operationally simple to debug – failed registrations can be inspected and replayed using curl/Postman; HTTP logs (method, path, status, body) make it easy to trace and audit what happened.
+
+Scales and evolves cleanly – stateless REST requests make horizontal scaling trivial, and you can extend the JSON schema or endpoints over time without breaking existing clients.
