@@ -1,62 +1,3 @@
-%% svc-handler v2.1 PUT sequence (Mermaid)
-sequenceDiagram
-    autonumber
-    participant C as Client
-    participant A as API Server
-    participant KV as Consul KV
-    participant S as Consul Sessions
-    participant CE as Consul Config Entries
-
-    C->>A: PUT /services/{name} + JSON
-    A->>A: Validate payload & name
-    alt Invalid payload/name
-        A-->>C: 422 Unprocessable Entity
-    else Valid
-        A->>KV: Put desired JSON (svc-handler/desired/part/ns/name)
-        alt KV write fails
-            A-->>C: 502 Bad Gateway (step="kv.put")
-        else KV ok
-            A->>S: Create session (TTL=LOCK_TTL)
-            A->>KV: Acquire lock (svc-handler/locks/part/ns/name, session)
-            alt Lock held by another worker
-                A-->>C: 409 Conflict (operation in progress)
-                A->>S: Destroy session
-            else Lock acquired
-                A->>CE: Set ServiceDefaults(name, protocol)
-                alt Defaults upsert fails
-                    A-->>C: 502 (apply, step="service-defaults")
-                else Defaults ok
-                    A->>CE: Upsert TerminatingGateway(tgwService, link=name, meta=routing/*)
-                    alt TGW upsert fails
-                        A-->>C: 502 (apply, step="terminating-gateway")
-                    else TGW ok
-                        opt Router provided
-                            A->>CE: Set ServiceRouter(name, prefix,retries)
-                            alt Router upsert fails
-                                A-->>C: 502 (apply, step="service-router")
-                            end
-                        end
-                        A->>CE: Get ServiceDefaults(name) (RequireConsistent)
-                        A->>CE: Get TerminatingGateway(tgwService) (RequireConsistent)
-                        opt Router provided
-                            A->>CE: Get ServiceRouter(name) (RequireConsistent)
-                        end
-                        alt Verify fails
-                            A-->>C: 502 (verify)
-                        else Verified
-                            A->>KV: Release lock
-                            A->>S: Destroy session
-                            A-->>C: 200 OK {"status":"applied","observed":{...}}
-                        end
-                    end
-                end
-            end
-        end
-    end
-```
-
-
-
 %% svc-handler v2.1.1 — PUT /services/{name} (explicit config-entry rendering, KV, sessions)
 sequenceDiagram
     autonumber
@@ -68,67 +9,67 @@ sequenceDiagram
 
     Note over A: Env: CONSUL_PARTITION=default, CONSUL_NAMESPACE=default, TGW_SERVICE_NAME=tgw-1
     C->>A: PUT /services/{name} + JSON payload
-    A->>A: Parse JSON → spec; force spec.Name = {name}
-    A->>A: Validate (name, routing.host/port, connect.protocol, router.*)
+    A->>A: Parse JSON into spec; set spec.Name from path
+    A->>A: Validate fields: name; routing.host and port; connect.protocol; router (if present)
 
-    alt Invalid payload/name
+    alt Invalid payload or name
         A-->>C: 422 Unprocessable Entity
         deactivate A
     else Valid
         Note over A,KV: Desired-state write (idempotent)
-        A->>KV: PUT key=svc-handler/desired/<part>/<ns>/{name} value=spec(JSON)
-        alt KV write fails (ACL/network/quorum)
-            A-->>C: 502 Bad Gateway (step="kv.put")
+        A->>KV: PUT desired key "svc-handler/desired/<part>/<ns>/{name}" with value spec (JSON)
+        alt KV write fails (ACL, network, quorum)
+            A-->>C: 502 Bad Gateway (step = "kv.put")
         else KV ok
             Note over A,S: Per-service lock via Consul Session
-            A->>S: Session.Create(TTL=LOCK_TTL, Behavior=delete, Name="svc-handler:{name}")
-            A->>KV: KV.Acquire key=svc-handler/locks/<part>/<ns>/{name} value={hostname}, session={sid}
+            A->>S: Session.Create (TTL = LOCK_TTL; Behavior = delete; Name = "svc-handler:{name}")
+            A->>KV: KV.Acquire lock key "svc-handler/locks/<part>/<ns>/{name}" with value {hostname}, session = {sid}
             alt Lock already held
                 A-->>C: 409 Conflict (operation in progress)
-                A->>S: Session.Destroy({sid})
+                A->>S: Session.Destroy ({sid})
             else Lock acquired
-                par Session renew
-                    A--)S: Session.Renew({sid}) every TTL/2 until done
-                and Render config entries (from spec)
-                    A->>A: Build ServiceDefaults(name, protocol, timeouts, meta/labels)
-                    A->>A: Build ServiceResolver(name)  %% (optional baseline; subsets/failover later)
-                    A->>A: Build ServiceRouter(name, prefix,retries) %% only if router provided
-                    A->>A: Build TGW mapping (tgw-1 ← name → routing.host:port + TLS/mTLS refs)
+                par Session renew loop
+                    A--)S: Session.Renew ({sid}) every TTL/2 until apply completes
+                and Render config entries from spec
+                    A->>A: Build ServiceDefaults (name, protocol, timeouts, meta)
+                    A->>A: Build ServiceResolver (name)  %% optional baseline; subsets later
+                    A->>A: Build ServiceRouter (name, prefix, retries)  %% only if router provided
+                    A->>A: Build TerminatingGateway mapping (tgw-1 ← name → routing host:port; TLS mTLS refs)
                 end
 
                 %% ---- APPLY (ordered, idempotent upserts) ----
-                A->>CE: Set ServiceDefaults(name, …)
+                A->>CE: Set ServiceDefaults
                 alt Defaults upsert fails
-                    A-->>C: 502 (apply, step="service-defaults")
+                    A-->>C: 502 (apply; step = "service-defaults")
                 else Defaults ok
-                    A->>CE: Set ServiceResolver(name, …)  %% noop if minimal
+                    A->>CE: Set ServiceResolver  %% no-op if minimal
                     alt Resolver upsert fails
-                        A-->>C: 502 (apply, step="service-resolver")
+                        A-->>C: 502 (apply; step = "service-resolver")
                     else Resolver ok
                         opt Router provided
-                            A->>CE: Set ServiceRouter(name, prefix,retries)
+                            A->>CE: Set ServiceRouter
                             alt Router upsert fails
-                                A-->>C: 502 (apply, step="service-router")
+                                A-->>C: 502 (apply; step = "service-router")
                             end
                         end
-                        A->>CE: Upsert TerminatingGateway(tgw-1, link=name, meta=routing/*,tls/*)
+                        A->>CE: Upsert TerminatingGateway (tgw-1; link = name; meta = routing and tls refs)
                         alt TGW upsert fails
-                            A-->>C: 502 (apply, step="terminating-gateway")
+                            A-->>C: 502 (apply; step = "terminating-gateway")
                         else TGW ok
                             %% ---- VERIFY (consistent reads) ----
-                            A->>CE: Get ServiceDefaults(name) [RequireConsistent]
-                            A->>CE: Get ServiceResolver(name) [RequireConsistent]
+                            A->>CE: Get ServiceDefaults (RequireConsistent)
+                            A->>CE: Get ServiceResolver (RequireConsistent)
                             opt Router provided
-                                A->>CE: Get ServiceRouter(name) [RequireConsistent]
+                                A->>CE: Get ServiceRouter (RequireConsistent)
                             end
-                            A->>CE: Get TerminatingGateway(tgw-1) [RequireConsistent]
+                            A->>CE: Get TerminatingGateway (RequireConsistent)
                             alt Any component missing or mismatched
                                 A-->>C: 502 (verify)
                             else Verified
                                 Note over A,KV,S: Teardown lock
-                                A->>KV: KV.Release key=svc-handler/locks/<part>/<ns>/{name}, session={sid}
-                                A->>S: Session.Destroy({sid})
-                                A-->>C: 200 OK {"name": "{name}", "status":"applied","observed":{defaults:"ok",resolver:"ok",router:"ok|skipped",tgw:"ok"}}
+                                A->>KV: KV.Release lock key "svc-handler/locks/<part>/<ns>/{name}" with session {sid}
+                                A->>S: Session.Destroy ({sid})
+                                A-->>C: 200 OK { "name": "{name}", "status": "applied", "observed": { "defaults": "ok", "resolver": "ok", "router": "ok|skipped", "tgw": "ok" } }
                             end
                         end
                     end
@@ -138,6 +79,6 @@ sequenceDiagram
     end
 
     %% ---- NOTES / ANNOTATIONS ----
-    Note over A: Rendering rules\n• Defaults.Protocol ← spec.connect.protocol (default tcp)\n• Defaults.Timeouts ← spec.connect.timeouts (if provided)\n• Resolver baseline (optional now; subsets/failover later)\n• Router only when spec.router present\n• TGW mapping encodes routing.host:port and tls refs as meta for TGW/SDS
+    Note over A: Rendering rules\n• Defaults.Protocol ← connect.protocol (default tcp)\n• Defaults.Timeouts ← connect.timeouts (if provided)\n• Resolver baseline now; advanced subsets/failover later\n• Router only when router is present\n• TGW mapping carries routing host:port and TLS or mTLS references as metadata for TGW/SDS
     Note over KV: Keys used\n• desired: svc-handler/desired/<part>/<ns>/{name}\n• locks:   svc-handler/locks/<part>/<ns>/{name}
-    Note over S: Session lifecycle\n• Create → Acquire → Renew (TTL/2) → Release → Destroy\n• On crash: TTL expiry auto-releases the lock
+    Note over S: Session lifecycle\n• Create → Acquire → Renew (TTL/2) → Release → Destroy\n• On crash, TTL expiry auto-releases the lock
