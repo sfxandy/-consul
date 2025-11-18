@@ -1,0 +1,103 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API Server
+    participant KV as Consul KV
+    participant CE as Consul Config Entries
+
+    C->>A: GET /services name
+    A->>A: Parse name from path
+    A->>A: Build KV keys using partition and namespace
+    A->>KV: Read desired base and resource docs
+    alt desired not found
+        A-->>C: 404 Not Found
+    else desired exists
+        A->>CE: Get ServiceDefaults consistent
+        A->>CE: Get ServiceResolver consistent
+        opt router present in desired
+            A->>CE: Get ServiceRouter consistent
+        end
+        A->>CE: Get TerminatingGateway consistent
+        A->>A: Build observed summary with presence and ids
+        A-->>C: 200 OK with desired and observed
+    end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API Server
+    participant KV as Consul KV
+    participant S as Consul Sessions
+    participant CE as Consul Config Entries
+
+    C->>A: DELETE /services name
+    A->>A: Parse name from path
+    A->>A: Build KV keys using partition and namespace
+
+    %% single writer
+    A->>S: Session create with TTL
+    A->>KV: KV acquire lock for service with session
+    alt lock held
+        A-->>C: 409 Conflict
+    else lock acquired
+        %% write tombstone before deletes
+        A->>KV: KV put desired part ns name tombstone.json with deleted true actor time reason
+
+        %% read desired to know expected resources
+        A->>KV: KV read desired resource docs for service
+        A->>A: Decide router exists or not
+
+        %% reverse order deletes
+        opt router exists
+            A->>CE: Delete ServiceRouter by name
+        end
+        A->>CE: Update TerminatingGateway remove link for name
+        A->>CE: Delete ServiceResolver by name
+        A->>CE: Delete ServiceDefaults by name
+
+        %% verify absence
+        A->>CE: Get ServiceDefaults consistent
+        A->>CE: Get ServiceResolver consistent
+        opt router expected
+            A->>CE: Get ServiceRouter consistent
+        end
+        A->>CE: Get TerminatingGateway consistent
+        A->>A: Confirm absent and link removed
+
+        %% finalize KV state with tombstone and observed
+        A->>KV: KV delete desired subtree except tombstone.json
+        A->>KV: KV put observed part ns name observed.json with all absent and health cleared
+
+        %% release and reply
+        A->>KV: KV release lock with session
+        A->>S: Session destroy
+        A-->>C: 200 OK deleted with tombstone
+    end
