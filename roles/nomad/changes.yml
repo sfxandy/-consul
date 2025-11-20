@@ -1,3 +1,40 @@
+# For non-root service users, this is the home directory used to derive
+# per-user config/data paths.
+# If left empty and nomad_service_user == ansible_user_id, the role will use
+# ansible_env.HOME. Otherwise you MUST set this explicitly.
+nomad_service_home: ""
+
+# In root-run mode, you can have jobs drop to these users via `user = "..."`.
+# The role will VERIFY these users exist (via `id -u`) and FAIL if any is missing.
+nomad_task_users: []
+
+# --- Systemd scope control ---
+# How Nomad is supervised:
+#   auto   -> 'system' if nomad_service_user == 'root', else 'user'
+#   system -> system-wide unit in /etc/systemd/system (requires root)
+#   user   -> per-user unit in ~/.config/systemd/user (runs under that user)
+#   none   -> role does not manage systemd at all
+nomad_systemd_scope: "auto"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ---
 # 0. Required input: nomad_service_user
 - name: "Nomad | Ensure nomad_service_user is defined"
