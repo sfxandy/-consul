@@ -1,3 +1,225 @@
+---
+# 0. Required input: nomad_service_user
+- name: "Nomad | Ensure nomad_service_user is defined"
+  ansible.builtin.assert:
+    that:
+      - nomad_service_user is defined
+      - nomad_service_user | length > 0
+    fail_msg: >
+      'nomad_service_user' must be provided
+      (e.g. via -e nomad_service_user=root or set in the play/inventory).
+
+# 1. Default group to user if not set
+- name: "Nomad | Default nomad_service_group to nomad_service_user"
+  ansible.builtin.set_fact:
+    nomad_service_group: "{{ nomad_service_group | default(nomad_service_user, true) }}"
+
+# 2. Verify service user exists (no creation), using `id -u`
+- name: "Nomad | Check service user exists"
+  ansible.builtin.command: "id -u {{ nomad_service_user }}"
+  register: nomad_service_id
+  changed_when: false
+  failed_when: nomad_service_id.rc != 0
+
+# 3. Derive service_home for non-root (or require explicit)
+- name: "Nomad | Set service_home from ansible_env.HOME when matching user"
+  ansible.builtin.set_fact:
+    nomad_service_home: "{{ ansible_env.HOME }}"
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+    - ansible_env.HOME is defined
+    - nomad_service_user == ansible_user_id
+
+- name: "Nomad | Fail if non-root service_home is empty"
+  ansible.builtin.fail:
+    msg: >
+      Could not determine home directory for non-root nomad_service_user='{{ nomad_service_user }}'.
+      Set 'nomad_service_home' explicitly when calling the role, or run the role
+      as that user so ansible_env.HOME can be used.
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+
+# 4. Compute config/data dirs from who runs Nomad
+- name: "Nomad | Compute config and data dirs"
+  ansible.builtin.set_fact:
+    nomad_config_dir: >-
+      {{ (nomad_service_user == 'root')
+         | ternary('/etc/nomad.d', nomad_service_home ~ '/.config/nomad.d') }}
+    nomad_data_dir: >-
+      {{ (nomad_service_user == 'root')
+         | ternary('/var/lib/nomad', nomad_service_home ~ '/.local/share/nomad') }}
+
+# 5. Verify task users (root-run mode only; no creation) via `id -u`
+- name: "Nomad | Check that task users exist (root-run mode only)"
+  ansible.builtin.command: "id -u {{ item }}"
+  register: nomad_task_id
+  changed_when: false
+  failed_when: nomad_task_id.rc != 0
+  loop: "{{ nomad_task_users }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - nomad_service_user == "root"
+    - nomad_task_users | length > 0
+
+# 6. Determine effective systemd scope
+- name: "Nomad | Determine effective systemd scope"
+  ansible.builtin.set_fact:
+    nomad_effective_scope: >-
+      {% if nomad_systemd_scope in ['system', 'user', 'none'] %}
+      {{ nomad_systemd_scope }}
+      {% else %}
+      {{ 'system' if nomad_service_user == 'root' else 'user' }}
+      {% endif %}
+
+- name: "Nomad | Validate systemd scope vs service user"
+  ansible.builtin.assert:
+    that:
+      - not (nomad_effective_scope == 'system' and nomad_service_user != 'root')
+    fail_msg: >
+      nomad_systemd_scope='system' requires nomad_service_user='root'.
+      Use nomad_systemd_scope='user' or 'none' for non-root services.
+
+# 7. Create dirs and install Nomad binary
+- name: "Nomad | Create config and data directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0750"
+  loop:
+    - "{{ nomad_config_dir }}"
+    - "{{ nomad_data_dir }}"
+
+- name: "Nomad | Download archive"
+  ansible.builtin.get_url:
+    url: "{{ nomad_download_base_url }}/{{ nomad_version }}/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    mode: "0644"
+
+- name: "Nomad | Unarchive"
+  ansible.builtin.unarchive:
+    src: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}"
+    remote_src: true
+    creates: "/tmp/nomad_{{ nomad_version }}/nomad"
+
+- name: "Nomad | Install binary"
+  ansible.builtin.copy:
+    src: "/tmp/nomad_{{ nomad_version }}/nomad"
+    dest: "{{ nomad_install_dir }}/nomad"
+    mode: "0755"
+    remote_src: true
+  notify:
+    - restart nomad system service
+    - restart nomad user service
+
+# 8. Config files (base / server / client)
+- name: "Nomad | Render base config (global settings)"
+  ansible.builtin.template:
+    src: "nomad-base.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-base.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  notify:
+    - restart nomad system service
+    - restart nomad user service
+
+- name: "Nomad | Render server config"
+  ansible.builtin.template:
+    src: "nomad-server.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-server.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_is_server
+  notify:
+    - restart nomad system service
+    - restart nomad user service
+
+- name: "Nomad | Render client config"
+  ansible.builtin.template:
+    src: "nomad-client.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-client.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_client_enabled
+  notify:
+    - restart nomad system service
+    - restart nomad user service
+
+# 9. Systemd units
+
+## 9a. System-wide unit (root)
+- name: "Nomad | Install systemd unit (system scope)"
+  ansible.builtin.template:
+    src: "nomad.service.j2"
+    dest: "/etc/systemd/system/{{ nomad_service_name }}.service"
+    mode: "0644"
+  when: nomad_effective_scope == 'system'
+  notify:
+    - daemon-reload-system
+    - restart nomad system service
+
+## 9b. User unit (non-root or explicit user scope)
+- name: "Nomad | Ensure user systemd directory exists (user scope)"
+  ansible.builtin.file:
+    path: "{{ nomad_service_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0700"
+  when: nomad_effective_scope == 'user'
+
+- name: "Nomad | Install systemd unit (user scope)"
+  ansible.builtin.template:
+    src: "nomad.service.j2"
+    dest: "{{ nomad_service_home }}/.config/systemd/user/{{ nomad_service_name }}.service"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0644"
+  when: nomad_effective_scope == 'user'
+  notify:
+    - daemon-reload-user
+    - restart nomad user service
+
+# If nomad_effective_scope == 'none', no systemd tasks run at all.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 roles/nomad/templates/nomad-base.hcl.j2
 hcl
