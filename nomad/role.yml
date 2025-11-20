@@ -1,0 +1,296 @@
+roles/nomad/defaults/main.yml
+---
+# HashiCorp Nomad role defaults
+
+# --- Nomad binary & paths ---
+nomad_version: "1.9.3"
+nomad_arch: "linux_amd64"
+nomad_install_dir: "/usr/local/bin"
+
+# --- How Nomad runs ---
+# "root"  -> systemd service runs as root, jobs can run as multiple users
+# "user"  -> systemd service runs as a specific user; jobs run as that user
+nomad_run_as: "root"              # or "user"
+nomad_user: "nomad"               # used only when nomad_run_as == "user"
+nomad_group: "nomad"
+
+# Root-mode locations
+nomad_root_config_dir: "/etc/nomad.d"
+nomad_root_data_dir: "/var/lib/nomad"
+
+# User-mode locations (override if the home isn't /home/<user>)
+nomad_user_home: "/home/{{ nomad_user }}"
+nomad_user_config_dir: "{{ nomad_user_home }}/.config/nomad.d"
+nomad_user_data_dir: "{{ nomad_user_home }}/.local/share/nomad"
+
+# In root mode, Nomad can run jobs as these users (if you set `user = "..."` in job specs).
+# They will be created if missing.
+nomad_task_users: []
+
+# --- Basic server/client config ---
+nomad_is_server: true
+nomad_bootstrap_expect: 1
+nomad_bind_addr: "0.0.0.0"
+
+nomad_client_enabled: true
+nomad_client_servers:
+  - "127.0.0.1:4647"
+
+# Enable raw_exec driver by default (comment out in template if not wanted)
+nomad_enable_raw_exec: true
+
+# Download base URL (override for air-gapped environments / local repo)
+nomad_download_base_url: "https://releases.hashicorp.com/nomad"
+
+# Service name
+nomad_service_name: "nomad"
+
+
+
+
+
+
+
+
+
+roles/nomad/tasks/main.yml
+---
+- name: "Nomad | Compute effective paths and service user"
+  ansible.builtin.set_fact:
+    nomad_service_user: "{{ nomad_run_as == 'user' | ternary(nomad_user, 'root') }}"
+    nomad_service_group: "{{ nomad_run_as == 'user' | ternary(nomad_group, 'root') }}"
+    nomad_config_dir: >-
+      {{ nomad_run_as == 'root'
+         | ternary(nomad_root_config_dir, nomad_user_config_dir) }}
+    nomad_data_dir: >-
+      {{ nomad_run_as == 'root'
+         | ternary(nomad_root_data_dir, nomad_user_data_dir) }}
+
+- name: "Nomad | Ensure group for dedicated Nomad user (user mode only)"
+  ansible.builtin.group:
+    name: "{{ nomad_group }}"
+    state: present
+  when: nomad_run_as == "user"
+
+- name: "Nomad | Ensure dedicated Nomad user (user mode only)"
+  ansible.builtin.user:
+    name: "{{ nomad_user }}"
+    group: "{{ nomad_group }}"
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+  when: nomad_run_as == "user"
+
+- name: "Nomad | Ensure task users exist (root mode only)"
+  ansible.builtin.user:
+    name: "{{ item }}"
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+    state: present
+  loop: "{{ nomad_task_users }}"
+  when:
+    - nomad_run_as == "root"
+    - nomad_task_users | length > 0
+
+- name: "Nomad | Create config and data directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0750"
+  loop:
+    - "{{ nomad_config_dir }}"
+    - "{{ nomad_data_dir }}"
+
+- name: "Nomad | Download archive"
+  ansible.builtin.get_url:
+    url: "{{ nomad_download_base_url }}/{{ nomad_version }}/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    mode: "0644"
+
+- name: "Nomad | Unarchive"
+  ansible.builtin.unarchive:
+    src: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}"
+    remote_src: true
+    creates: "/tmp/nomad_{{ nomad_version }}/nomad"
+
+- name: "Nomad | Install binary"
+  ansible.builtin.copy:
+    src: "/tmp/nomad_{{ nomad_version }}/nomad"
+    dest: "{{ nomad_install_dir }}/nomad"
+    mode: "0755"
+    remote_src: true
+  notify: restart nomad
+
+# --- CONFIG FILES SPLIT INTO BASE / SERVER / CLIENT ---
+
+- name: "Nomad | Render base config (global settings)"
+  ansible.builtin.template:
+    src: "nomad-base.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-base.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  notify: restart nomad
+
+- name: "Nomad | Render server config"
+  ansible.builtin.template:
+    src: "nomad-server.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-server.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_is_server
+  notify: restart nomad
+
+- name: "Nomad | Render client config"
+  ansible.builtin.template:
+    src: "nomad-client.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-client.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_client_enabled
+  notify: restart nomad
+
+- name: "Nomad | Install systemd unit"
+  ansible.builtin.template:
+    src: "nomad.service.j2"
+    dest: "/etc/systemd/system/{{ nomad_service_name }}.service"
+    mode: "0644"
+  notify:
+    - daemon-reload
+    - restart nomad
+
+- name: "Nomad | Ensure service enabled and started"
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: started
+
+
+
+
+
+
+
+
+
+roles/nomad/templates/nomad-base.hcl.j2
+data_dir  = "{{ nomad_data_dir }}"
+bind_addr = "{{ nomad_bind_addr }}"
+
+{% if nomad_enable_raw_exec %}
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}
+{% endif %}
+
+/*
+ Global options:
+  - data_dir, bind_addr
+  - plugins (raw_exec, etc.)
+
+ Server/client stanzas live in:
+  - nomad-server.hcl
+  - nomad-client.hcl
+*/+
+
+
+
+
+
+
+
+
+roles/nomad/templates/nomad-server.hcl.j2
+server {
+  enabled          = true
+  bootstrap_expect = {{ nomad_bootstrap_expect }}
+}
+
+/*
+ Server-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/
+
+
+
+
+
+
+
+
+
+roles/nomad/templates/nomad-client.hcl.j2
+client {
+  enabled = true
+  servers = [
+{% for s in nomad_client_servers %}
+    "{{ s }}"{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}
+
+/*
+ Client-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/
+
+
+
+
+
+
+
+
+roles/nomad/templates/nomad.service.j2
+[Unit]
+Description=HashiCorp Nomad
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart={{ nomad_install_dir }}/nomad agent -config={{ nomad_config_dir }}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+LimitNOFILE=65536
+TasksMax=infinity
+
+{% if nomad_run_as == "user" %}
+User={{ nomad_user }}
+Group={{ nomad_group }}
+{% else %}
+# Run as root so Nomad can drop privileges to per-task users.
+User=root
+Group=root
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+
+
+
+
+
+
+roles/nomad/handlers/main.yml
+---
+- name: daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: restart nomad
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    state: restarted
