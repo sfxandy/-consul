@@ -1,14 +1,29 @@
 ---
+# HashiCorp Nomad role defaults
+
+# --- Nomad binary & paths ---
 nomad_version: "1.9.3"
 nomad_arch: "linux_amd64"
 nomad_install_dir: "/usr/local/bin"
 
+# --- Service account controls ---
+# REQUIRED: nomad_service_user (NOT declared here on purpose).
+# You must set it in play/inventory/extra-vars, e.g.:
+#   -e nomad_service_user=root
+#   -e nomad_service_user=zkqbsd
+#
+# Group defaults to user if empty.
 nomad_service_group: ""
-nomad_service_home: ""
-nomad_manage_service_account: false
 
+# Only needed for non-root runs when you want to override the detected home.
+# If left empty, we'll derive it from NSS (getent passwd).
+nomad_service_home: ""
+
+# In root-run mode, you can have jobs drop to these users via `user = "..."`.
+# The role will VERIFY these users exist and FAIL if any is missing.
 nomad_task_users: []
 
+# --- Basic server/client config ---
 nomad_is_server: true
 nomad_bootstrap_expect: 1
 nomad_bind_addr: "0.0.0.0"
@@ -17,8 +32,11 @@ nomad_client_enabled: true
 nomad_client_servers:
   - "127.0.0.1:4647"
 
+# Enable raw_exec driver by default
 nomad_enable_raw_exec: true
 
+# Download base URL (override for air-gapped environments / local repo)
 nomad_download_base_url: "https://releases.hashicorp.com/nomad"
 
+# Service name
 nomad_service_name: "nomad"

@@ -1,4 +1,5 @@
 ---
+# 0. Required input: nomad_service_user
 - name: "Nomad | Ensure nomad_service_user is defined"
   ansible.builtin.assert:
     that:
@@ -8,66 +9,45 @@
       'nomad_service_user' must be provided
       (e.g. via -e nomad_service_user=root or set in the play/inventory).
 
+# 1. Default group to user if not set
 - name: "Nomad | Default nomad_service_group to nomad_service_user"
   ansible.builtin.set_fact:
     nomad_service_group: "{{ nomad_service_group | default(nomad_service_user, true) }}"
 
-- name: "Nomad | Ensure group for service user (managed and non-root)"
-  ansible.builtin.group:
-    name: "{{ nomad_service_group }}"
-    state: present
-  when:
-    - nomad_manage_service_account
-    - nomad_service_user != "root"
-
-- name: "Nomad | Ensure service user (managed and non-root)"
-  ansible.builtin.user:
-    name: "{{ nomad_service_user }}"
-    group: "{{ nomad_service_group }}"
-    system: true
-    create_home: true
-    shell: /usr/sbin/nologin
-  when:
-    - nomad_manage_service_account
-    - nomad_service_user != "root"
-
-- name: "Nomad | Set service_home from ansible_env.HOME when matching user"
-  ansible.builtin.set_fact:
-    nomad_service_home: "{{ ansible_env.HOME }}"
-  when:
-    - nomad_service_user != "root"
-    - (nomad_service_home | length) == 0
-    - ansible_env.HOME is defined
-    - nomad_service_user == ansible_user_id
-
-- name: "Nomad | Fallback: lookup service_home with getent passwd"
+# 2. Verify service user exists (no creation)
+- name: "Nomad | Lookup service user in passwd database"
   ansible.builtin.getent:
     database: passwd
     key: "{{ nomad_service_user }}"
-  register: _nomad_getent
-  when:
-    - nomad_service_user != "root"
-    - (nomad_service_home | length) == 0
+  register: nomad_service_getent
 
-- name: "Nomad | Set service_home from getent result"
-  ansible.builtin.set_fact:
-    nomad_service_home: "{{ _nomad_getent.passwd[nomad_service_user][4] }}"
-  when:
-    - nomad_service_user != "root"
-    - (nomad_service_home | length) == 0
-    - _nomad_getent is defined
-    - _nomad_getent.passwd is defined
-    - _nomad_getent.passwd[nomad_service_user] is defined
-
-- name: "Nomad | Fail if service_home could not be resolved for non-root user"
+- name: "Nomad | Fail if service user does not exist"
   ansible.builtin.fail:
     msg: >
-      Could not determine home directory for nomad_service_user='{{ nomad_service_user }}'.
+      Service user '{{ nomad_service_user }}' does not exist in passwd/NSS.
+      Create it outside this role, then re-run.
+  when: >
+    nomad_service_getent.passwd is not defined or
+    nomad_service_getent.passwd[nomad_service_user] is not defined
+
+# 3. Derive service_home for non-root (unless explicitly overridden)
+- name: "Nomad | Set service_home from passwd entry (non-root)"
+  ansible.builtin.set_fact:
+    nomad_service_home: "{{ nomad_service_getent.passwd[nomad_service_user][4] }}"
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+
+- name: "Nomad | Fail if non-root service_home is empty"
+  ansible.builtin.fail:
+    msg: >
+      Could not determine home directory for non-root nomad_service_user='{{ nomad_service_user }}'.
       Set 'nomad_service_home' explicitly when calling the role.
   when:
     - nomad_service_user != "root"
     - (nomad_service_home | length) == 0
 
+# 4. Compute config/data dirs from who runs Nomad
 - name: "Nomad | Compute config and data dirs"
   ansible.builtin.set_fact:
     nomad_config_dir: >-
@@ -77,18 +57,29 @@
       {{ (nomad_service_user == 'root')
          | ternary('/var/lib/nomad', nomad_service_home ~ '/.local/share/nomad') }}
 
-- name: "Nomad | Ensure task users exist (root-run mode only)"
-  ansible.builtin.user:
-    name: "{{ item }}"
-    system: true
-    create_home: true
-    shell: /usr/sbin/nologin
-    state: present
+# 5. Verify task users (root-run mode only; no creation)
+- name: "Nomad | Check that task users exist (root-run mode only)"
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
   loop: "{{ nomad_task_users }}"
+  register: nomad_task_getent
   when:
     - nomad_service_user == "root"
     - nomad_task_users | length > 0
 
+- name: "Nomad | Fail if any task user does not exist"
+  ansible.builtin.fail:
+    msg: >
+      Task user '{{ item.item }}' does not exist in passwd/NSS.
+      Create it outside this role or remove it from nomad_task_users.
+  loop: "{{ nomad_task_getent.results | default([]) }}"
+  when:
+    - nomad_service_user == "root"
+    - nomad_task_users | length > 0
+    - (item.passwd is not defined or item.passwd[item.item] is not defined)
+
+# 6. Create dirs and install Nomad binary
 - name: "Nomad | Create config and data directories"
   ansible.builtin.file:
     path: "{{ item }}"
@@ -121,6 +112,7 @@
     remote_src: true
   notify: restart nomad
 
+# 7. Config files (base / server / client)
 - name: "Nomad | Render base config (global settings)"
   ansible.builtin.template:
     src: "nomad-base.hcl.j2"
@@ -150,6 +142,7 @@
   when: nomad_client_enabled
   notify: restart nomad
 
+# 8. Systemd service
 - name: "Nomad | Install systemd unit"
   ansible.builtin.template:
     src: "nomad.service.j2"
