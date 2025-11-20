@@ -1,0 +1,19 @@
+[Unit]
+Description=HashiCorp Nomad
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart={{ nomad_install_dir }}/nomad agent -config={{ nomad_config_dir }}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+LimitNOFILE=65536
+TasksMax=infinity
+
+User={{ nomad_service_user }}
+Group={{ nomad_service_group }}
+
+[Install]
+WantedBy=multi-user.target

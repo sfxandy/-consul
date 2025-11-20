@@ -1,0 +1,9 @@
+---
+- name: daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: restart nomad
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    state: restarted

@@ -1,0 +1,20 @@
+data_dir  = "{{ nomad_data_dir }}"
+bind_addr = "{{ nomad_bind_addr }}"
+
+{% if nomad_enable_raw_exec %}
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}
+{% endif %}
+
+/*
+ Global options:
+  - data_dir, bind_addr
+  - plugins (raw_exec, etc.)
+
+ Server/client stanzas live in:
+  - nomad-server.hcl
+  - nomad-client.hcl
+*/

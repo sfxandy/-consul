@@ -1,0 +1,166 @@
+---
+- name: "Nomad | Ensure nomad_service_user is defined"
+  ansible.builtin.assert:
+    that:
+      - nomad_service_user is defined
+      - nomad_service_user | length > 0
+    fail_msg: >
+      'nomad_service_user' must be provided
+      (e.g. via -e nomad_service_user=root or set in the play/inventory).
+
+- name: "Nomad | Default nomad_service_group to nomad_service_user"
+  ansible.builtin.set_fact:
+    nomad_service_group: "{{ nomad_service_group | default(nomad_service_user, true) }}"
+
+- name: "Nomad | Ensure group for service user (managed and non-root)"
+  ansible.builtin.group:
+    name: "{{ nomad_service_group }}"
+    state: present
+  when:
+    - nomad_manage_service_account
+    - nomad_service_user != "root"
+
+- name: "Nomad | Ensure service user (managed and non-root)"
+  ansible.builtin.user:
+    name: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+  when:
+    - nomad_manage_service_account
+    - nomad_service_user != "root"
+
+- name: "Nomad | Set service_home from ansible_env.HOME when matching user"
+  ansible.builtin.set_fact:
+    nomad_service_home: "{{ ansible_env.HOME }}"
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+    - ansible_env.HOME is defined
+    - nomad_service_user == ansible_user_id
+
+- name: "Nomad | Fallback: lookup service_home with getent passwd"
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ nomad_service_user }}"
+  register: _nomad_getent
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+
+- name: "Nomad | Set service_home from getent result"
+  ansible.builtin.set_fact:
+    nomad_service_home: "{{ _nomad_getent.passwd[nomad_service_user][4] }}"
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+    - _nomad_getent is defined
+    - _nomad_getent.passwd is defined
+    - _nomad_getent.passwd[nomad_service_user] is defined
+
+- name: "Nomad | Fail if service_home could not be resolved for non-root user"
+  ansible.builtin.fail:
+    msg: >
+      Could not determine home directory for nomad_service_user='{{ nomad_service_user }}'.
+      Set 'nomad_service_home' explicitly when calling the role.
+  when:
+    - nomad_service_user != "root"
+    - (nomad_service_home | length) == 0
+
+- name: "Nomad | Compute config and data dirs"
+  ansible.builtin.set_fact:
+    nomad_config_dir: >-
+      {{ (nomad_service_user == 'root')
+         | ternary('/etc/nomad.d', nomad_service_home ~ '/.config/nomad.d') }}
+    nomad_data_dir: >-
+      {{ (nomad_service_user == 'root')
+         | ternary('/var/lib/nomad', nomad_service_home ~ '/.local/share/nomad') }}
+
+- name: "Nomad | Ensure task users exist (root-run mode only)"
+  ansible.builtin.user:
+    name: "{{ item }}"
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+    state: present
+  loop: "{{ nomad_task_users }}"
+  when:
+    - nomad_service_user == "root"
+    - nomad_task_users | length > 0
+
+- name: "Nomad | Create config and data directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0750"
+  loop:
+    - "{{ nomad_config_dir }}"
+    - "{{ nomad_data_dir }}"
+
+- name: "Nomad | Download archive"
+  ansible.builtin.get_url:
+    url: "{{ nomad_download_base_url }}/{{ nomad_version }}/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    mode: "0644"
+
+- name: "Nomad | Unarchive"
+  ansible.builtin.unarchive:
+    src: "/tmp/nomad_{{ nomad_version }}_{{ nomad_arch }}.zip"
+    dest: "/tmp/nomad_{{ nomad_version }}"
+    remote_src: true
+    creates: "/tmp/nomad_{{ nomad_version }}/nomad"
+
+- name: "Nomad | Install binary"
+  ansible.builtin.copy:
+    src: "/tmp/nomad_{{ nomad_version }}/nomad"
+    dest: "{{ nomad_install_dir }}/nomad"
+    mode: "0755"
+    remote_src: true
+  notify: restart nomad
+
+- name: "Nomad | Render base config (global settings)"
+  ansible.builtin.template:
+    src: "nomad-base.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-base.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  notify: restart nomad
+
+- name: "Nomad | Render server config"
+  ansible.builtin.template:
+    src: "nomad-server.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-server.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_is_server
+  notify: restart nomad
+
+- name: "Nomad | Render client config"
+  ansible.builtin.template:
+    src: "nomad-client.hcl.j2"
+    dest: "{{ nomad_config_dir }}/nomad-client.hcl"
+    owner: "{{ nomad_service_user }}"
+    group: "{{ nomad_service_group }}"
+    mode: "0640"
+  when: nomad_client_enabled
+  notify: restart nomad
+
+- name: "Nomad | Install systemd unit"
+  ansible.builtin.template:
+    src: "nomad.service.j2"
+    dest: "/etc/systemd/system/{{ nomad_service_name }}.service"
+    mode: "0644"
+  notify:
+    - daemon-reload
+    - restart nomad
+
+- name: "Nomad | Ensure service enabled and started"
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: started

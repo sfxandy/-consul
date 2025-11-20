@@ -1,0 +1,9 @@
+server {
+  enabled          = true
+  bootstrap_expect = {{ nomad_bootstrap_expect }}
+}
+
+/*
+ Server-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/

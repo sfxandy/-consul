@@ -1,0 +1,13 @@
+client {
+  enabled = true
+  servers = [
+{% for s in nomad_client_servers %}
+    "{{ s }}"{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}
+
+/*
+ Client-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/
