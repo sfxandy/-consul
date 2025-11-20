@@ -15,12 +15,14 @@ nomad_install_dir: "/usr/local/bin"
 # Group defaults to user if empty.
 nomad_service_group: ""
 
-# Only needed for non-root runs when you want to override the detected home.
-# If left empty, we'll derive it from NSS (getent passwd).
+# For non-root service users, this is the home directory used to derive
+# per-user config/data paths.
+# If left empty and nomad_service_user == ansible_user_id, the role will use
+# ansible_env.HOME. Otherwise you MUST set this explicitly.
 nomad_service_home: ""
 
 # In root-run mode, you can have jobs drop to these users via `user = "..."`.
-# The role will VERIFY these users exist and FAIL if any is missing.
+# The role will VERIFY these users exist (via `id -u`) and FAIL if any is missing.
 nomad_task_users: []
 
 # --- Basic server/client config ---
