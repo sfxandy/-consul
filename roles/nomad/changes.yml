@@ -1,0 +1,248 @@
+
+roles/nomad/templates/nomad-base.hcl.j2
+hcl
+Copy code
+data_dir  = "{{ nomad_data_dir }}"
+bind_addr = "{{ nomad_bind_addr }}"
+
+{% if nomad_enable_raw_exec %}
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}
+{% endif %}
+
+/*
+ Global options:
+  - data_dir, bind_addr
+  - plugins (raw_exec, etc.)
+
+ Server/client stanzas live in:
+  - nomad-server.hcl
+  - nomad-client.hcl
+*/
+roles/nomad/templates/nomad-server.hcl.j2
+hcl
+Copy code
+server {
+  enabled          = true
+  bootstrap_expect = {{ nomad_bootstrap_expect }}
+}
+
+/*
+ Server-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/
+roles/nomad/templates/nomad-client.hcl.j2
+h
+Copy code
+client {
+  enabled = true
+  servers = [
+{% for s in nomad_client_servers %}
+    "{{ s }}"{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}
+
+/*
+ Client-specific configuration only.
+ Shared options live in nomad-base.hcl.
+*/
+roles/nomad/templates/nomad.service.j2
+Single template for both scopes; we only set User=/Group= in system scope:
+
+ini
+Copy code
+[Unit]
+Description=HashiCorp Nomad
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart={{ nomad_install_dir }}/nomad agent -config={{ nomad_config_dir }}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+LimitNOFILE=65536
+TasksMax=infinity
+
+{% if nomad_effective_scope == 'system' %}
+User={{ nomad_service_user }}
+Group={{ nomad_service_group }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target
+For system scope: runs as User={{ nomad_service_user }} (often root).
+
+For user scope: unit is a user unit; systemd already runs it as that user, so no User= line needed.
+
+roles/nomad/handlers/main.yml
+yaml
+Copy code
+---
+# System-level daemon-reload and restart
+- name: daemon-reload-system
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: nomad_effective_scope == 'system'
+
+- name: restart nomad system service
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: restarted
+  when: nomad_effective_scope == 'system'
+
+# User-level daemon-reload and restart
+- name: daemon-reload-user
+  become: true
+  become_user: "{{ nomad_service_user }}"
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  when: nomad_effective_scope == 'user'
+
+- name: restart nomad user service
+  become: true
+  become_user: "{{ nomad_service_user }}"
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: restarted
+    scope: user
+  when: nomad_effective_scope == 'user'
+How you’d actually call this
+1. Classic root Nomad, systemd system unit (default)
+yaml
+Copy code
+- hosts: nomad_nodes
+  become: true
+  roles:
+    - role: nomad
+      vars:
+        nomad_service_user: root
+        # nomad_systemd_scope: auto  # default → 'system' for root
+        nomad_task_users:
+          - svc_app
+          - svc_batch
+2. Non-root Nomad with systemd user unit
+yaml
+Copy code
+- hosts: nomad_nodes
+  become: true
+  roles:
+    - role: nomad
+      vars:
+        nomad_service_user: zkqbsd
+        nomad_service_home: /weird/home/zkqbsd   # unless you're connecting *as* zkqbsd
+        nomad_systemd_scope: user
+This will:
+
+Put configs under /weird/home/zkqbsd/.config/nomad.d
+
+Data under /weird/home/zkqbsd/.local/share/nomad
+
+Unit at /weird/home/zkqbsd/.config/systemd/user/nomad.service
+
+Use systemd module with scope: user as become_user: zkqbsd.
+
+3. No systemd at all (you manage supervision)
+yaml
+Copy code
+- hosts: nomad_nodes
+  become: true
+  roles:
+    - role: nomad
+      vars:
+        nomad_service_user: root          # or non-root
+        nomad_systemd_scope: none
+Then you can run Nomad however you like (container, tmux, custom service files).
+
+If you want this bundled as a ZIP again like before, say the word and I’ll package this exact version.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+roles/nomad/templates/nomad.service.j2
+
+Single template for both scopes; we only set User=/Group= in system scope:
+
+[Unit]
+Description=HashiCorp Nomad
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart={{ nomad_install_dir }}/nomad agent -config={{ nomad_config_dir }}
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+LimitNOFILE=65536
+TasksMax=infinity
+
+{% if nomad_effective_scope == 'system' %}
+User={{ nomad_service_user }}
+Group={{ nomad_service_group }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+
+
+
+
+
+roles/nomad/handlers/main.yml
+---
+# System-level daemon-reload and restart
+- name: daemon-reload-system
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: nomad_effective_scope == 'system'
+
+- name: restart nomad system service
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: restarted
+  when: nomad_effective_scope == 'system'
+
+# User-level daemon-reload and restart
+- name: daemon-reload-user
+  become: true
+  become_user: "{{ nomad_service_user }}"
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  when: nomad_effective_scope == 'user'
+
+- name: restart nomad user service
+  become: true
+  become_user: "{{ nomad_service_user }}"
+  ansible.builtin.systemd:
+    name: "{{ nomad_service_name }}"
+    enabled: true
+    state: restarted
+    scope: user
+  when: nomad_effective_scope == 'user'
