@@ -1,4 +1,44 @@
----
+- name: "Nomad | Stat candidate nomad binaries"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: nomad_bin_stats
+  when: (nomad_bin | length) == 0
+  loop: "{{ nomad_bin_search_paths }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: "Nomad | Choose first existing nomad binary"
+  ansible.builtin.set_fact:
+    nomad_bin: "{{ item.stat.path }}"
+  loop: "{{ nomad_bin_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+  when:
+    - (nomad_bin | length) == 0
+    - item.stat.exists | default(false)
+    - item.stat.isreg | default(false)
+
+- name: "Nomad | Fail if no nomad binary found"
+  ansible.builtin.fail:
+    msg: >
+      Unable to locate Nomad binary.
+      Searched: {{ nomad_bin_search_paths | join(', ') }}.
+      Set 'nomad_bin' explicitly or adjust 'nomad_bin_search_paths'.
+  when: (nomad_bin | length) == 0
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  ---
 # 0. Required input: nomad_service_user
 - name: "Nomad | Ensure nomad_service_user is defined"
   ansible.builtin.assert:
