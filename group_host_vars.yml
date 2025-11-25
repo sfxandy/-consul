@@ -1,0 +1,53 @@
+# tasks/main.yml (or included from there)
+
+- name: "Set inventory root directory"
+  set_fact:
+    inventory_root: "/srv/ansible/inventory/consul"   # <-- adjust to your path
+
+# --- Deploy group_vars if any exist in the role ---
+
+- name: "Find group_vars files in role"
+  set_fact:
+    role_group_vars_files: >-
+      {{ lookup('fileglob',
+                role_path + '/files/group_vars/*.yml',
+                wantlist=True) }}
+
+- name: "Ensure inventory group_vars directory exists (if we have any files)"
+  file:
+    path: "{{ inventory_root }}/group_vars"
+    state: directory
+    mode: "0755"
+  when: role_group_vars_files | length > 0
+
+- name: "Copy group_vars files to inventory"
+  copy:
+    src: "{{ item }}"
+    dest: "{{ inventory_root }}/group_vars/{{ item | basename }}"
+    mode: "0644"
+  loop: "{{ role_group_vars_files }}"
+  when: role_group_vars_files | length > 0
+
+# --- Deploy host_vars if any exist in the role ---
+
+- name: "Find host_vars files in role"
+  set_fact:
+    role_host_vars_files: >-
+      {{ lookup('fileglob',
+                role_path + '/files/host_vars/*.yml',
+                wantlist=True) }}
+
+- name: "Ensure inventory host_vars directory exists (if we have any files)"
+  file:
+    path: "{{ inventory_root }}/host_vars"
+    state: directory
+    mode: "0755"
+  when: role_host_vars_files | length > 0
+
+- name: "Copy host_vars files to inventory"
+  copy:
+    src: "{{ item }}"
+    dest: "{{ inventory_root }}/host_vars/{{ item | basename }}"
+    mode: "0644"
+  loop: "{{ role_host_vars_files }}"
+  when: role_host_vars_files | length > 0
