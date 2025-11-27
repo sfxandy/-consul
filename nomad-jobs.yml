@@ -1,0 +1,32 @@
+# Ensure ~/.nomad/jobs exists and copy any Nomad job files from role_path/files/jobs/*.nomad
+
+- name: Set Nomad jobs directory under the remote user's home
+  set_fact:
+    nomad_jobs_dir: "{{ ansible_env.HOME }}/.nomad/jobs"
+
+- name: Find Nomad job files in this role
+  set_fact:
+    role_nomad_job_files: >-
+      {{ lookup('ansible.builtin.fileglob',
+                role_path + '/files/jobs/*.nomad',
+                wantlist=True) }}
+
+- name: Ensure ~/.nomad directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.nomad"
+    state: directory
+    mode: "0700"
+
+- name: Ensure ~/.nomad/jobs directory exists
+  ansible.builtin.file:
+    path: "{{ nomad_jobs_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Copy Nomad job files into ~/.nomad/jobs
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ nomad_jobs_dir }}/{{ item | basename }}"
+    mode: "0640"
+  loop: "{{ role_nomad_job_files }}"
+  when: role_nomad_job_files | length > 0
