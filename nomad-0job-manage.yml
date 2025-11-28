@@ -1,0 +1,49 @@
+- name: "Ensure Nomad jobs are in desired state"
+  hosts: localhost           # or your control node group
+  gather_facts: false
+  vars:
+    nomad_jobs_dir: "{{ ansible_env.HOME }}/.nomad/jobs"
+  tasks:
+    - name: "Ensure Nomad job {{ item.id }} is RUNNING"
+      ansible.builtin.command:
+        cmd: "nomad job run {{ nomad_jobs_dir }}/{{ item.file }}"
+      environment:
+        NOMAD_ADDR: "{{ nomad_addr }}"
+        NOMAD_TOKEN: "{{ nomad_token | default(omit) }}"
+      register: nomad_job_run_result
+      changed_when: >
+        ('created' in nomad_job_run_result.stdout) or
+        ('updated' in nomad_job_run_result.stdout)
+      loop: "{{ nomad_jobs | selectattr('state', 'equalto', 'running') | list }}"
+      delegate_to: "{{ nomad_job_runner_host }}"
+      run_once: true
+
+    - name: "STOP Nomad job {{ item.id }} (keep definition)"
+      ansible.builtin.command:
+        cmd: "nomad job stop {{ item.id }}"
+      environment:
+        NOMAD_ADDR: "{{ nomad_addr }}"
+        NOMAD_TOKEN: "{{ nomad_token | default(omit) }}"
+      register: nomad_job_stop_result
+      changed_when: "'job is already stopped' not in nomad_job_stop_result.stderr | default('')"
+      failed_when: >
+        nomad_job_stop_result.rc != 0 and
+        ('Unknown job' not in nomad_job_stop_result.stderr | default(''))
+      loop: "{{ nomad_jobs | selectattr('state', 'equalto', 'stopped') | list }}"
+      delegate_to: "{{ nomad_job_runner_host }}"
+      run_once: true
+
+    - name: "PURGE Nomad job {{ item.id }} (stop + delete definition)"
+      ansible.builtin.command:
+        cmd: "nomad job stop -purge {{ item.id }}"
+      environment:
+        NOMAD_ADDR: "{{ nomad_addr }}"
+        NOMAD_TOKEN: "{{ nomad_token | default(omit) }}"
+      register: nomad_job_purge_result
+      changed_when: "'Unknown job' not in nomad_job_purge_result.stderr | default('')"
+      failed_when: >
+        nomad_job_purge_result.rc != 0 and
+        ('Unknown job' not in nomad_job_purge_result.stderr | default(''))
+      loop: "{{ nomad_jobs | selectattr('state', 'equalto', 'purged') | list }}"
+      delegate_to: "{{ nomad_job_runner_host }}"
+      run_once: true
