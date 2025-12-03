@@ -1,0 +1,74 @@
+# Acceptance Criteria – Single-Instance Consul Server Provisioning Script
+
+## 1. All ports can be modified from default values
+
+*Scenario: Ports are provided as non-default values*  
+- *GIVEN* the Consul server is not running  
+  *AND* the script is executed with custom port values (e.g. HTTP, RPC, Serf, DNS)  
+- *WHEN* the script provisions the Consul server  
+- *THEN* the Consul configuration must use the provided custom port values  
+  *AND* the default Consul port values must not be used  
+  *AND* the server must start successfully and listen on the configured ports.
+
+## 2. Server must bootstrap with ACLs enabled
+
+*Scenario: Server starts with ACLs enabled*  
+- *GIVEN* the Consul server is not running  
+  *AND* the script is executed with valid configuration parameters  
+- *WHEN* the script provisions and starts the Consul server  
+- *THEN* ACLs must be enabled in the Consul configuration  
+  *AND* the server must start in a state where access without a valid token is denied for protected operations.
+
+## 3. Tokens must be created
+
+*Scenario: Script creates required ACL tokens*  
+- *GIVEN* the Consul server is running with ACLs enabled  
+  *AND* there are no existing ACL tokens for initial bootstrap  
+- *WHEN* the script completes its provisioning run  
+- *THEN* a bootstrap/management token must be created  
+  *AND* any required additional tokens (e.g. agent, client, replication tokens as defined by the design) must be created  
+  *AND* the script must output or store these token values in a secure and documented way.
+
+## 4. Default policies must be applied
+
+*Scenario: Default ACL policies are created and attached*  
+- *GIVEN* the Consul server is running with ACLs enabled  
+  *AND* the script has successfully created the required tokens  
+- *WHEN* the script completes its provisioning run  
+- *THEN* the default policies (e.g. read-only, service-write, node-read, or any defined baseline policies) must exist in Consul  
+  *AND* each policy must match the defined rules for that policy  
+  *AND* the appropriate tokens must be associated with their corresponding default policies.
+
+## 5. Script is idempotent
+
+*Scenario: Script is run when Consul is already correctly configured and running*  
+- *GIVEN* the Consul server is already running  
+  *AND* ACLs, tokens, policies, and ports already match the desired configuration state  
+- *WHEN* the script is executed again with the same parameters  
+- *THEN* the script must detect that the desired state is already achieved  
+  *AND* it must not restart the Consul server  
+  *AND* it must not recreate existing tokens or policies  
+  *AND* it must exit successfully indicating that no changes were required.
+
+*Scenario: Script is run when Consul is running but partially configured*  
+- *GIVEN* the Consul server is running  
+  *AND* some required tokens or policies are missing or misconfigured  
+- *WHEN* the script is executed  
+- *THEN* the script must detect the drift from desired state  
+- *AND* it must only create or update the missing or incorrect resources  
+- *AND* it must leave already-correct configuration unchanged.
+
+## 6. Detailed usage / help information displayed
+
+*Scenario: Help/usage is requested*  
+- *GIVEN* the operator runs the script with a help flag (e.g. `--help` or `-h`)  
+- *WHEN* the script processes the request  
+- *THEN* it must display a clear usage message including:  
+  - required and optional parameters  
+  - how to configure ports  
+  - how ACLs, tokens, and policies are handled  
+  - examples of typical usage  
+  *AND* the script must exit without making any changes to the system.
+
+
+  
